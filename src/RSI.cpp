@@ -8,7 +8,7 @@
 
 
 RSISolver::RSISolver(const Mesh& mesh, RSIConfig cfg)
-    : mesh_(mesh), cfg_(std::move(cfg)), ordinates_(Quadrature::uniformSphere(cfg_.angularN)),
+    : mesh_(mesh), cfg_(std::move(cfg)), ordinates_(Quadrature::levelSymmetricSN(cfg_.angularN)),
      sweep_(mesh, cfg_.sourceShape) {}
      // sweep_ 是非结构网格输运扫掠器，它负责在给定方向 omega 
      //和散射源 source 的情况下，求解空间离散后的输运方程，得到 psi

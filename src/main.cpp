@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
 
 
         for (std::string scat : {"isotropic", "anisotropic"}) {//各向同性，各向异性
-            for (int angularN : {8,16}) {//M=N*N
+            for (int angularN : {8,16}) {//level-symmetric S_N, M=N*(N+2)
                 RSIConfig cfg;
                 cfg.groupCount = 2;
                 cfg.angularN = angularN;
@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
             std::cout << "开始输出 Figure 5 空间场数据...\n";
 
             // 粗角度SI
-            //M=16(4*4)
+            // S4: M=24
             RSIConfig coarseCfg;
             coarseCfg.groupCount = 1;
             coarseCfg.angularN = 4;

@@ -13,7 +13,7 @@ struct FieldRow {
 };
 
 struct RSIConfig {
-    int angularN = 4;              // M = angularN^2
+    int angularN = 4;              // level-symmetric S_N 阶数，M = N * (N + 2)
     int maxSIters = 100;
     double siTolerance = 1e-10;
     std::vector<int> sampleCounts; // Figure 2 的横坐标 S

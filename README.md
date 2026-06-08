@@ -8,15 +8,19 @@ https://github.com/lanl/tycho2
 
 
 其他可修改的参数：(都在/src/main.cpp中)
-angularN : {4,16}//角向划分M=angularN*angularN，支持两个数作比较
+angularN : {4,16}//level-symmetric S_N 角向划分，M=N*(N+2)，支持两个数作比较
+
+当前角向离散使用 level-symmetric S_N 方向集，不再使用 Gauss-Legendre × 均匀方位角。
+每个八分区使用 i+j+k=N/2+2 的层对称方向，符号反射到全空间。
+方向权重统一归一化为 1/[N*(N+2)]，满足 sum_m ω_m=1、sum_m ω_m Ω_m=0、sum_m ω_m Ω_{m,x}^2=sum_m ω_m Ω_{m,y}^2=sum_m ω_m Ω_{m,z}^2=1/3。
 
 cfg.groupCount = 2//分组数G，G<=M
 
 cfg.sampleCounts = {2,4,8,16,32,64,128,256,512,1024};//样本数量，可以继续加
 
-coarseCfg.angularN = 4;(55行)//粗角度划分
+coarseCfg.angularN = 4;(55行)//粗角度划分，S4 对应 M=24
 
-fineCfg.angularN = 16;(70行)//细角度划分，论文取128，对应于M=2^14，细角度SI，RSI，RSI_tail共用这个参数
+fineCfg.angularN = 16;(70行)//细角度划分，S16 对应 M=288，细角度SI，RSI，RSI_tail共用这个参数
 
 fineCfg.groupCount = 2(69行) //细角度分组。注意：这个参数和cfg.groupCount是独立的，用于计算射线效应，cfg.groupCount则用于计算收敛阶，此外只有RSI才会用到这个参数，SI不用分组，因此58行的coarseCfg.groupCount = 1是一个默认参数
 
