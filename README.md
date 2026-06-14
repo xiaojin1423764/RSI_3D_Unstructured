@@ -33,10 +33,19 @@ cd gmsh_work
 gmsh example1.geo -3 -format msh2 -o example1.msh
 python3 msh_to_rsi_csv.py example1.msh data/cells.csv data/faces.csv
 cd ..
-make run
+make run-rec
+make plot
 
-入射区域形状不需要重新生成 Gmsh 网格。默认使用矩形区域；如果希望使用面积相同的圆形区域，运行时传入 `SOURCE_SHAPE=circle`：
-make run SOURCE_SHAPE=circle
+入射区域形状不需要重新生成 Gmsh 网格，也不需要切换代码。矩形 Rec 条件和圆形 Cir 条件都已整合在 `TransportSweep.cpp` 的 `boundaryInflow()` 中，运行时用开关选择：
+
+```bash
+make run-rec   # rectangle, 输出 Rec_* 图对应的数据
+make run-cir   # circle, 输出 Cir_* 图对应的数据
+make run-rec-figure5  # rectangle, 只输出 Figure 5 数据
+make run-cir-figure5  # circle, 只输出 Figure 5 数据
+make plot      # 只生成 Figure 5 图片
+make plot-all  # 生成 Figure 2、Figure 5、网格和角度划分图片
+```
 
 
 
@@ -48,9 +57,11 @@ make run SOURCE_SHAPE=circle
 /example/csv_data/figure5_SI_fine.csv
 对应论文的Figure2 收敛阶和Figure5 射线效应数据
 
-最后运行/example/plot_figure1.py得到各向同性和各向异性收敛阶
-以及/example/plot_figure5.py得到细角度SI，粗角度SI，RSI，RSI_tail关于z=0.75，z=0.5，z=0.25截面的射线效应图片，粗角度SI与其他三者有明显区别
-生成图片会按入射区域命名：矩形区域前缀为 `Rec`，圆形区域前缀为 `Cir`，例如 `Rec_RSI_3D_iso_back.png` 或 `Cir_RSI_3D_iso_back.png`。
+最后运行 /examples/plot_figures.py 生成图片。图片会按入射区域命名：矩形区域前缀为 `Rec`，圆形区域前缀为 `Cir`。
+Figure 5 数据按入射区域分开保存，避免 Rec/Cir 相互覆盖：
+`examples/csv_data/Rec/figure5_*.csv` 和 `examples/csv_data/Cir/figure5_*.csv`。
+`make plot` 会读取已有的 Rec/Cir 数据并分别画图。Figure 5 的 SI coarse、SI fine、RSI、RSI tail 四类场都会输出 y 截面和 layer 堆叠图；voxel 3D 图单独用 `make plot-voxel3d` 生成。例如：
+`Cir_SI_coarse_y0.50.png`、`Cir_SI_coarse_layer_stack.png`、`Cir_SI_coarse_voxel3d_iso_back.png`。
 
 
 
@@ -92,27 +103,25 @@ rsi/
   examples/
     /csv_data
       figure2_data.csv
-      figure5_RSI_tail.csv
-      figure5_RSI.csv
-      figure5_SI_coarse.csv
-      figure5_SI_fine.csv
+      Rec/
+        figure5_RSI_tail.csv
+        figure5_RSI.csv
+        figure5_SI_coarse.csv
+        figure5_SI_fine.csv
+      Cir/
+        figure5_RSI_tail.csv
+        figure5_RSI.csv
+        figure5_SI_coarse.csv
+        figure5_SI_fine.csv
     /Figures
       figure2_anisotropic.png
       figure2_isotropic.png
-      Rec_RSI_tail_z0.25.png
-      Rec_RSI_tail_z0.50.png
-      Rec_RSI_tail_z0.75.png
-      Rec_RSI_z0.25.png
-      Rec_RSI_z0.50.png
-      Rec_RSI_z0.75.png
-      Rec_SI_coarse_z0.25.png
-      Rec_SI_coarse_z0.50.png
-      Rec_SI_coarse_z0.75.png
-      Rec_SI_fine_z0.25.png
-      Rec_SI_fine_z0.50.png
-      Rec_SI_fine_z0.75.png
-    plot_figure2.py
-    plot_figure5.py
+      Rec_SI_coarse_y0.50.png
+      Rec_SI_coarse_layer_stack.png
+      Cir_SI_coarse_y0.50.png
+      Cir_SI_coarse_layer_stack.png
+    plot_figures.py
+    plot_naming.py
 ```
 
 

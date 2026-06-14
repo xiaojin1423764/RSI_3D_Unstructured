@@ -11,6 +11,31 @@ $(TARGET): $(SRC)
 
 run: $(TARGET)
 	mkdir -p examples/csv_data
-	./$(TARGET) gmsh_work/data/cells.csv gmsh_work/data/faces.csv examples/csv_data/figure2_data.csv $(SOURCE_SHAPE)
+	./$(TARGET) --source-shape $(SOURCE_SHAPE) --out examples/csv_data/figure2_data.csv gmsh_work/data/cells.csv gmsh_work/data/faces.csv
+
+run-rec: SOURCE_SHAPE = rectangle
+run-rec: run
+
+run-cir: SOURCE_SHAPE = circle
+run-cir: run
+
+run-figure5: $(TARGET)
+	mkdir -p examples/csv_data
+	./$(TARGET) --source-shape $(SOURCE_SHAPE) --only figure5 gmsh_work/data/cells.csv gmsh_work/data/faces.csv
+
+run-rec-figure5: SOURCE_SHAPE = rectangle
+run-rec-figure5: run-figure5
+
+run-cir-figure5: SOURCE_SHAPE = circle
+run-cir-figure5: run-figure5
+
+plot:
+	python3 examples/plot_figures.py --only figure5
+
+plot-voxel3d:
+	python3 examples/plot_figures.py --only voxel3d
+
+plot-all:
+	python3 examples/plot_figures.py
 clean:
 	rm -f $(TARGET)

@@ -181,18 +181,19 @@ double TransportSweep::boundaryInflow(const Face& face, const Vec3& omega) const
     if (face.bc_type == "example1") {
         constexpr double sourceCenterX = 0.5;
         constexpr double sourceCenterZ = 0.5;
-        constexpr double rectangleHalfWidth = 0.1;
+        constexpr double rectangleHalfLengthX = 0.15;
+        constexpr double rectangleHalfWidthZ = 0.1;
         constexpr double pi = 3.141592653589793238462643383279502884;
         constexpr double equivalentCircleRadius =
-            2.0 * rectangleHalfWidth / std::sqrt(pi);
+            0.2 / std::sqrt(pi);
 
         const bool onBottomFace = std::fabs(face.center.y) < 1e-10;
         bool inSourceWindow = false;
 
         if (sourceShape_ == "rectangle") {
             inSourceWindow =
-                std::fabs(face.center.x - sourceCenterX) <= rectangleHalfWidth &&
-                std::fabs(face.center.z - sourceCenterZ) <= rectangleHalfWidth;
+                std::fabs(face.center.x - sourceCenterX) <= rectangleHalfLengthX &&
+                std::fabs(face.center.z - sourceCenterZ) <= rectangleHalfWidthZ;
         } else if (sourceShape_ == "circle") {
             const double dx = face.center.x - sourceCenterX;
             const double dz = face.center.z - sourceCenterZ;

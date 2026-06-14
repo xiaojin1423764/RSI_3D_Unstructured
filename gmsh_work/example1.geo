@@ -4,8 +4,8 @@ SetFactory("OpenCASCADE");
 Box(1) = {0, 0, 0, 1, 1, 1};
 
 // 网格尺寸，越小网格越密
-Mesh.CharacteristicLengthMin = 0.12;
-Mesh.CharacteristicLengthMax = 0.12;
+Mesh.CharacteristicLengthMin = 0.05;
+Mesh.CharacteristicLengthMax = 0.05;
 
 Mesh.Algorithm3D = 4;
 
