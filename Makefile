@@ -35,6 +35,15 @@ plot:
 plot-voxel3d:
 	python3 examples/plot_figures.py --only voxel3d
 
+plot-volume3d:
+	python3 examples/plot_figures.py --only volume3d
+
+plot-isosurfaces:
+	python3 examples/plot_figures.py --only isosurfaces
+
+plot-paper-slices:
+	python3 examples/plot_figures.py --only paper-slices
+
 plot-all:
 	python3 examples/plot_figures.py
 clean:

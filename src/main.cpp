@@ -159,10 +159,10 @@ int main(int argc, char** argv) {
             // 细角度SI
             RSIConfig fineCfg;
             fineCfg.groupCount = 1;
-            fineCfg.angularN =16;
+            fineCfg.angularN = 32;
             fineCfg.maxSIters = 80;
             fineCfg.siTolerance = 1e-10;
-            fineCfg.sampleCounts = {256};
+            fineCfg.sampleCounts = {512};
             fineCfg.scattering = "isotropic";
             fineCfg.sourceShape = sourceShape;
             fineCfg.seed = 20260513u;
@@ -172,8 +172,8 @@ int main(int argc, char** argv) {
             auto phiSIfine = fineSolver.runSIField(Nfine);
             RSISolver::writeFieldCSV(siFineFile, mesh, phiSIfine);
 
-            // RSI，使用256个样本
-            int S = 256;
+            // RSI，使用512个样本
+            int S = 512;
             auto phiRSI = fineSolver.runRSIFieldAtN(Nfine, S, 0);
             RSISolver::writeFieldCSV(rsiFile, mesh, phiRSI);
 

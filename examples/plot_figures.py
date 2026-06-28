@@ -14,7 +14,9 @@ import pandas as pd
 from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.colors import PowerNorm
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
+from scipy.ndimage import gaussian_filter
 from scipy.interpolate import griddata
+from scipy.spatial import cKDTree
 
 from plot_naming import figure_base, source_prefix
 
@@ -22,13 +24,14 @@ from plot_naming import figure_base, source_prefix
 BASE_DIR = os.path.dirname(__file__)
 CSV_DIR = os.path.join(BASE_DIR, "csv_data")
 FIGURE_DIR = os.path.join(BASE_DIR, "Figures")
+PAPER_SLICE_DIR = os.path.join(BASE_DIR, "..", "Figure5_paper_slices")
 MSH_FILE = os.path.join(BASE_DIR, "..", "gmsh_work", "example1.msh")
 
 FIELD_FILES = [
-    ("figure5_SI_fine.csv", "SI fine", "si_fine", "S16, M=288"),
+    ("figure5_SI_fine.csv", "SI fine", "si_fine", "S32, M=1088"),
     ("figure5_SI_coarse.csv", "SI coarse", "si_coarse", "S4, M=24"),
-    ("figure5_RSI.csv", "RSI", "rsi", "S16, M=288, samples=256"),
-    ("figure5_RSI_tail.csv", "RSI tail average", "rsi_tail", "S16, M=288, samples=256, tail=10"),
+    ("figure5_RSI.csv", "RSI", "rsi", "S32, M=1088, samples=512"),
+    ("figure5_RSI_tail.csv", "RSI tail average", "rsi_tail", "S32, M=1088, samples=512, tail=10"),
 ]
 SOURCE_CASES = [
     ("Rec", os.path.join(CSV_DIR, "Rec")),
@@ -36,12 +39,30 @@ SOURCE_CASES = [
 ]
 
 Y_SLICES = [0.00, 0.25, 0.50, 0.75, 1.00]
-LAYER_STACK_Y_SLICES = [0.05, 0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95]
+PAPER_Y_SLICE_VALUES = [round(0.01 * i, 2) for i in range(21)]
+PAPER_SOURCE_CENTER_Z = 0.5
+PAPER_SOURCE_RADIUS = 0.2 / np.sqrt(np.pi)
+PAPER_Z_SLICE_VALUES = [
+    round(v, 2)
+    for v in np.arange(
+        PAPER_SOURCE_CENTER_Z - PAPER_SOURCE_RADIUS,
+        PAPER_SOURCE_CENTER_Z + PAPER_SOURCE_RADIUS + 0.005,
+        0.01,
+    )
+]
+LAYER_STACK_Y_SLICES = [0.025 + 0.05 * i for i in range(20)]
 
 VMIN = 0.0
 VMAX = 2.2
 FIELD_NORM = PowerNorm(gamma=0.55, vmin=VMIN, vmax=VMAX)
 Y_SLICE_NORM = PowerNorm(gamma=0.35, vmin=0.0, vmax=0.12)
+PAPER_FIGURE5_NORM = PowerNorm(gamma=0.55, vmin=0.0, vmax=2.7)
+PAPER_FIGURE5_LEVELS = np.linspace(0.0, 2.7, 181)
+PAPER_FIGURE5_CMAP = "jet"
+PAPER_SLICE_GRID_N = 260
+PAPER_SLICE_IDW_K = 96
+PAPER_SLICE_IDW_POWER = 1.65
+PAPER_SLICE_SMOOTH_SIGMA = 2.2
 
 VOLUME_GRID_N = 64
 LEGACY_VOXEL_GRID_N = 128
@@ -50,13 +71,14 @@ VOLUME_VIEWS = [("iso_back", 24, 132)]
 PYVISTA_GRID_N = 96
 PYVISTA_LOG_MIN = np.log10(0.0035)
 PYVISTA_LOG_MAX = np.log10(0.12)
+PYVISTA_VOLUME_GRID_N = 64
+PYVISTA_ISOSURFACE_SMOOTH_SIGMA = 2.0
+PYVISTA_ISOSURFACE_SMOOTH_PASSES = 80
+PYVISTA_ISOSURFACE_RELAXATION = 0.08
 
-LAYERED_Z_SLICES = [0.18, 0.26, 0.34, 0.42, 0.50, 0.58, 0.66, 0.74, 0.82]
-LAYERED_VISIBLE_MIN = 0.015
-LAYERED_NORM = PowerNorm(gamma=0.42, vmin=LAYERED_VISIBLE_MIN, vmax=VMAX)
-LAYER_STACK_ALPHA_LOW = 0.018
-LAYER_STACK_ALPHA_HIGH = 0.08
-LAYER_STACK_ALPHA_MAX = 0.34
+LAYER_STACK_ALPHA_LOW = 0.01
+LAYER_STACK_ALPHA_HIGH = 0.07
+LAYER_STACK_ALPHA_MAX = 0.20
 
 
 def csv_path(name):
@@ -194,6 +216,72 @@ def plot_field_slice(df, title, out_path, axis, value):
     return True
 
 
+def interpolate_strict_plane_idw(df, axis, value):
+    if axis == "z":
+        horizontal, vertical = "x", "y"
+    elif axis == "y":
+        horizontal, vertical = "x", "z"
+    else:
+        raise ValueError("axis must be 'y' or 'z'")
+
+    coords = np.linspace(0.0, 1.0, PAPER_SLICE_GRID_N)
+    gh, gv = np.meshgrid(coords, coords, indexing="xy")
+    plane_points = np.empty((gh.size, 3), dtype=float)
+    plane_points[:, {"x": 0, "y": 1, "z": 2}[axis]] = value
+    plane_points[:, {"x": 0, "y": 1, "z": 2}[horizontal]] = gh.ravel()
+    plane_points[:, {"x": 0, "y": 1, "z": 2}[vertical]] = gv.ravel()
+
+    points = df[["x", "y", "z"]].to_numpy(dtype=float)
+    values = df["phi0"].to_numpy(dtype=float)
+    tree = cKDTree(points)
+    distances, indices = tree.query(
+        plane_points,
+        k=min(PAPER_SLICE_IDW_K, len(points)),
+        workers=-1,
+    )
+    distances = np.maximum(distances, 1.0e-12)
+    weights = 1.0 / distances ** PAPER_SLICE_IDW_POWER
+    field = np.sum(weights * values[indices], axis=1) / np.sum(weights, axis=1)
+    field = field.reshape(gh.shape)
+    field = gaussian_filter(field, sigma=PAPER_SLICE_SMOOTH_SIGMA, mode="nearest")
+    field = np.clip(field, 0.0, None)
+    return coords, coords, field, horizontal, vertical
+
+
+def plot_paper_field_slice(df, out_path, axis, value):
+    xvals, yvals, field, horizontal, vertical = interpolate_strict_plane_idw(df, axis, value)
+
+    fig, ax = plt.subplots(figsize=(4.1, 3.55))
+    mappable = ax.imshow(
+        field,
+        origin="lower",
+        extent=(float(xvals[0]), float(xvals[-1]), float(yvals[0]), float(yvals[-1])),
+        interpolation="bilinear",
+        aspect="equal",
+        cmap=PAPER_FIGURE5_CMAP,
+        norm=PAPER_FIGURE5_NORM,
+    )
+    cbar = fig.colorbar(mappable, ax=ax, fraction=0.045, pad=0.02, extend="max")
+    cbar.set_ticks(np.arange(0.5, 2.6, 0.5))
+    cbar.ax.tick_params(labelsize=8, length=2.5, width=0.6)
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(horizontal, fontsize=9)
+    ax.set_ylabel(vertical, fontsize=9)
+    ax.set_xticks(np.arange(0.1, 1.0, 0.1))
+    ax.set_yticks(np.arange(0.1, 1.0, 0.1))
+    ax.tick_params(labelsize=8, length=2.5, width=0.6)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.6)
+
+    fig.tight_layout(pad=0.15)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
 def available_source_cases():
     cases = []
     for prefix, source_dir in SOURCE_CASES:
@@ -229,6 +317,25 @@ def plot_figure5_slices():
                 )
 
 
+def plot_figure5_paper_slices():
+    for prefix, source_dir in available_source_cases():
+        for file_name, _title, out_dir, _params in FIELD_FILES:
+            file_path = source_csv_path(source_dir, file_name)
+            df = pd.read_csv(file_path)
+            base = figure_base(file_path, prefix)
+            out_base_dir = os.path.join(PAPER_SLICE_DIR, out_dir)
+            ensure_dir(out_base_dir)
+
+            for axis, values in [("y", PAPER_Y_SLICE_VALUES), ("z", PAPER_Z_SLICE_VALUES)]:
+                for value in values:
+                    plot_paper_field_slice(
+                        df,
+                        os.path.join(out_base_dir, f"{base}_{axis}{value:.2f}_paper.png"),
+                        axis,
+                        value,
+                    )
+
+
 def interpolate_volume(df, grid_n):
     pts = df[["x", "y", "z"]].to_numpy()
     values = df["phi0"].to_numpy()
@@ -240,6 +347,17 @@ def interpolate_volume(df, grid_n):
     missing = np.isnan(volume)
     if missing.any():
         volume[missing] = griddata(pts, values, (gx, gy, gz), method="nearest")[missing]
+    volume = np.clip(volume, 0.0, None)
+    return edges, centers, volume
+
+
+def interpolate_volume_nearest(df, grid_n):
+    pts = df[["x", "y", "z"]].to_numpy()
+    values = df["phi0"].to_numpy()
+    edges = np.linspace(0.0, 1.0, grid_n + 1)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    gx, gy, gz = np.meshgrid(centers, centers, centers, indexing="ij")
+    volume = griddata(pts, values, (gx, gy, gz), method="nearest")
     volume = np.clip(volume, 0.0, None)
     return edges, centers, volume
 
@@ -284,6 +402,137 @@ def plot_3d_voxel_legacy(df, title, out_prefix, views):
         )
 
 
+def plot_3d_pyvista_volume(df, title, out_path):
+    try:
+        import pyvista as pv
+    except ImportError:
+        return False
+
+    _, centers, volume = interpolate_volume_nearest(df, PYVISTA_VOLUME_GRID_N)
+    contrast, lo_value, hi_value = enhanced_log_field(volume)
+    hi_tail = max(float(np.quantile(contrast, 0.985)), 1.0e-8)
+    contrast = np.clip(contrast / hi_tail, 0.0, 1.0)
+    contrast = smoothstep(0.28, 0.92, contrast) ** 1.35
+
+    grid = pv.ImageData()
+    grid.dimensions = contrast.shape
+    spacing = 1.0 / float(PYVISTA_VOLUME_GRID_N - 1)
+    grid.spacing = (spacing, spacing, spacing)
+    grid.origin = (0.0, 0.0, 0.0)
+    grid.point_data["ray_contrast"] = contrast.ravel(order="F")
+
+    plotter = pv.Plotter(off_screen=True, window_size=(1900, 1500))
+    plotter.set_background("white")
+    plotter.add_volume(
+        grid,
+        scalars="ray_contrast",
+        cmap="viridis",
+        clim=(0.0, 1.0),
+        opacity=[0.00, 0.00, 0.00, 0.00, 0.008, 0.025, 0.08, 0.24, 0.58, 1.00],
+        mapper="smart",
+        shade=False,
+        show_scalar_bar=False,
+    )
+
+    outline = pv.Box(bounds=(0, 1, 0, 1, 0, 1)).outline()
+    plotter.add_mesh(outline, color=(0.22, 0.22, 0.22), line_width=1.8)
+    plotter.add_axes(
+        xlabel="x",
+        ylabel="y",
+        zlabel="z",
+        line_width=5,
+        labels_off=False,
+    )
+    plotter.add_scalar_bar(
+        title=f"phi0, log scale\n[{lo_value:.1e}, {hi_value:.2g}]",
+        vertical=True,
+        position_x=0.88,
+        position_y=0.20,
+        width=0.08,
+        height=0.60,
+        label_font_size=24,
+        title_font_size=24,
+        color="black",
+    )
+    plotter.add_text(title + ", PyVista volume rendering", position="upper_edge", font_size=22, color="black")
+    plotter.camera_position = [(-0.72, 2.75, 1.10), (0.5, 0.5, 0.50), (0, 0, 1)]
+    plotter.camera.parallel_projection = True
+    plotter.camera.parallel_scale = 0.93
+    plotter.screenshot(out_path)
+    plotter.close()
+    return True
+
+
+def plot_3d_multilevel_isosurfaces(df, title, out_path):
+    try:
+        import pyvista as pv
+    except ImportError:
+        return False
+
+    _, centers, volume = interpolate_volume_nearest(df, PYVISTA_VOLUME_GRID_N)
+    volume = gaussian_filter(volume, sigma=PYVISTA_ISOSURFACE_SMOOTH_SIGMA, mode="nearest")
+    contrast, lo_value, hi_value = enhanced_log_field(volume)
+    hi_tail = max(float(np.quantile(contrast, 0.985)), 1.0e-8)
+    contrast = np.clip(contrast / hi_tail, 0.0, 1.0)
+    contrast = smoothstep(0.28, 0.92, contrast) ** 1.35
+
+    grid = pv.ImageData()
+    grid.dimensions = contrast.shape
+    spacing = 1.0 / float(PYVISTA_VOLUME_GRID_N - 1)
+    grid.spacing = (spacing, spacing, spacing)
+    grid.origin = (0.0, 0.0, 0.0)
+    grid.point_data["ray_contrast"] = contrast.ravel(order="F")
+
+    positive = contrast[contrast > 0.02]
+    if len(positive) == 0:
+        return False
+
+    levels = np.unique(np.quantile(positive, [0.70, 0.84, 0.93, 0.98]))
+    surfaces = grid.contour(isosurfaces=levels, scalars="ray_contrast")
+    if surfaces.n_points > 0:
+        surfaces = surfaces.smooth(
+            n_iter=PYVISTA_ISOSURFACE_SMOOTH_PASSES,
+            relaxation_factor=PYVISTA_ISOSURFACE_RELAXATION,
+            boundary_smoothing=True,
+            feature_smoothing=True,
+        )
+
+    plotter = pv.Plotter(off_screen=True, window_size=(1900, 1500))
+    plotter.set_background("white")
+    plotter.add_mesh(
+        surfaces,
+        scalars="ray_contrast",
+        cmap="viridis",
+        clim=(float(levels.min()), float(levels.max())),
+        opacity=0.58,
+        smooth_shading=True,
+        show_scalar_bar=False,
+    )
+
+    outline = pv.Box(bounds=(0, 1, 0, 1, 0, 1)).outline()
+    plotter.add_mesh(outline, color=(0.20, 0.20, 0.20), line_width=1.8)
+    plotter.add_axes(xlabel="x", ylabel="y", zlabel="z", line_width=5, labels_off=False)
+    plotter.add_scalar_bar(
+        title=f"phi0, log scale\n[{lo_value:.1e}, {hi_value:.2g}]",
+        vertical=True,
+        position_x=0.88,
+        position_y=0.20,
+        width=0.08,
+        height=0.60,
+        label_font_size=24,
+        title_font_size=24,
+        color="black",
+    )
+    plotter.add_text(title + ", multilevel isosurfaces", position="upper_edge", font_size=22, color="black")
+    plotter.camera_position = [(-0.72, 2.75, 1.10), (0.5, 0.5, 0.50), (0, 0, 1)]
+    plotter.camera.parallel_projection = True
+    plotter.camera.parallel_scale = 0.93
+    plotter.enable_anti_aliasing("ssaa")
+    plotter.screenshot(out_path)
+    plotter.close()
+    return True
+
+
 def smoothstep(edge0, edge1, values):
     t = np.clip((values - edge0) / max(edge1 - edge0, 1.0e-12), 0.0, 1.0)
     return t * t * (3.0 - 2.0 * t)
@@ -312,7 +561,7 @@ def write_clean_slice_texture(df, y0, out_path, norm):
     ax.set_facecolor((1, 1, 1, 0))
     cmap = LinearSegmentedColormap.from_list(
         "viridis_layer_stack",
-        plt.get_cmap("viridis")(np.linspace(0.12, 1.0, 256)),
+        plt.get_cmap("viridis")(np.linspace(0.0, 1.0, 256)),
     )
     image_field = field.T
     rgba = cmap(norm(image_field))
@@ -348,7 +597,7 @@ def plot_3d_image_slice_stack(df, title, out_prefix, out_path):
     texture_paths = []
     layer_values = df["phi0"].to_numpy(dtype=float)
     layer_vmax = max(float(np.quantile(layer_values, 0.98)), LAYER_STACK_ALPHA_HIGH)
-    layer_norm = PowerNorm(gamma=0.38, vmin=0.0, vmax=layer_vmax)
+    layer_norm = PowerNorm(gamma=0.35, vmin=0.0, vmax=layer_vmax)
     for y0 in LAYER_STACK_Y_SLICES:
         texture_path = os.path.join(texture_dir, f"{os.path.basename(base_prefix)}_texture_y{y0:.2f}.png")
         if not write_clean_slice_texture(df, y0, texture_path, layer_norm):
@@ -662,47 +911,16 @@ def plot_figure5_3d(include_layers=True, include_voxel=True):
                 plot_3d_voxel_legacy(df, plot_title, os.path.join(out_base_dir, f"{base}_voxel3d"), VOLUME_VIEWS)
 
 
-def plot_layered_slices(df, title, out_path):
-    fig = plt.figure(figsize=(6, 5))
-    ax = fig.add_subplot(111, projection="3d")
-    mappable = None
-    for z0 in LAYERED_Z_SLICES:
-        sub = slice_near_plane(df, "z", z0, quantile=0.035)
-        if len(sub) < 3:
-            continue
-        values = sub["phi0"].to_numpy()
-        if values.max() < LAYERED_VISIBLE_MIN:
-            continue
-        visible = values >= LAYERED_VISIBLE_MIN
-        if visible.sum() < 3:
-            continue
-        triang = tri.Triangulation(sub["x"].to_numpy(), sub["y"].to_numpy())
-        point_visible = visible[triang.triangles]
-        triang.set_mask(~point_visible.all(axis=1))
-        mappable = ax.tricontourf(
-            triang,
-            values,
-            levels=np.linspace(LAYERED_VISIBLE_MIN, VMAX, 80),
-            norm=LAYERED_NORM,
-            zdir="z",
-            offset=z0,
-            alpha=0.38,
-            antialiased=True,
-        )
-
-    if mappable is not None:
-        fig.colorbar(mappable, ax=ax, label=r"$\phi_0$", shrink=0.72, pad=0.08)
-
-    draw_box_axes(ax)
-    ax.set_title(f"{title}, layered slices")
-    finish_3d_axis(ax, 18, 132)
-    ax.set_axis_off()
-    plt.tight_layout()
-    plt.savefig(out_path, dpi=300)
-    plt.close()
+def plot_figure5_outputs():
+    plot_figure5_slices()
+    plot_figure5_3d(include_layers=True, include_voxel=False)
 
 
-def plot_figure5_layers():
+def plot_figure5_voxel3d():
+    plot_figure5_3d(include_layers=False, include_voxel=True)
+
+
+def plot_figure5_volume3d():
     ensure_dir(FIGURE_DIR)
     for prefix, source_dir in available_source_cases():
         for file_name, title, out_dir, params in FIELD_FILES:
@@ -711,16 +929,31 @@ def plot_figure5_layers():
             base = figure_base(file_path, prefix)
             out_base_dir = os.path.join(FIGURE_DIR, out_dir)
             ensure_dir(out_base_dir)
-            plot_layered_slices(df, titled_with_params(title, params), os.path.join(out_base_dir, f"{base}_z_layer_stack.png"))
+            out_path = os.path.join(out_base_dir, f"{base}_volume3d_iso_back.png")
+            print(f"Writing {out_path}", flush=True)
+            plot_3d_pyvista_volume(
+                df,
+                titled_with_params(title, params),
+                out_path,
+            )
 
 
-def plot_figure5_outputs():
-    plot_figure5_slices()
-    plot_figure5_3d(include_layers=True, include_voxel=False)
-
-
-def plot_figure5_voxel3d():
-    plot_figure5_3d(include_layers=False, include_voxel=True)
+def plot_figure5_isosurfaces():
+    ensure_dir(FIGURE_DIR)
+    for prefix, source_dir in available_source_cases():
+        for file_name, title, out_dir, params in FIELD_FILES:
+            file_path = source_csv_path(source_dir, file_name)
+            df = pd.read_csv(file_path)
+            base = figure_base(file_path, prefix)
+            out_base_dir = os.path.join(FIGURE_DIR, out_dir)
+            ensure_dir(out_base_dir)
+            out_path = os.path.join(out_base_dir, f"{base}_isosurface_iso_back.png")
+            print(f"Writing {out_path}", flush=True)
+            plot_3d_multilevel_isosurfaces(
+                df,
+                titled_with_params(title, params),
+                out_path,
+            )
 
 
 def read_tetra_mesh(msh_file=MSH_FILE):
@@ -753,10 +986,28 @@ def tetra_boundary_faces(tets):
     return np.array([face for face, count in face_count.items() if count == 1], dtype=int)
 
 
+def tetra_volumes(points, tets):
+    p0 = points[tets[:, 0]]
+    p1 = points[tets[:, 1]]
+    p2 = points[tets[:, 2]]
+    p3 = points[tets[:, 3]]
+    return np.abs(np.einsum("ij,ij->i", np.cross(p1 - p0, p2 - p0), p3 - p0)) / 6.0
+
+
+def edge_lengths(points, edges):
+    return np.linalg.norm(points[edges[:, 0]] - points[edges[:, 1]], axis=1)
+
+
 def plot_tetra_mesh():
     points, tets = read_tetra_mesh()
     edges = tetra_edges(tets)
     boundary_faces = tetra_boundary_faces(tets)
+    volumes = tetra_volumes(points, tets)
+    lengths = edge_lengths(points, edges)
+    mesh_stats = (
+        f"{len(points):,} vertices, {len(tets):,} tetrahedra, {len(boundary_faces):,} boundary faces\n"
+        f"mean cell volume {volumes.mean():.2e}, mean edge length {lengths.mean():.3f}"
+    )
     out_dir = os.path.join(FIGURE_DIR, "mesh")
     ensure_dir(out_dir)
 
@@ -777,7 +1028,7 @@ def plot_tetra_mesh():
             shade=False,
         )
         draw_box_axes(ax)
-        ax.set_title("Tetrahedral mesh")
+        ax.set_title(f"Tetrahedral mesh\n{mesh_stats}", fontsize=11)
         finish_3d_axis(ax, elev, azim)
         ax.set_axis_off()
         plt.tight_layout()
@@ -820,6 +1071,9 @@ def plot_angle_quadrature(sn_orders=(4, 16)):
 
     for sn_order in sn_orders:
         directions = level_symmetric_sn(sn_order)
+        direction_count = len(directions)
+        octant_count = direction_count // 8
+        angular_stats = f"M={direction_count} directions, {octant_count} per octant"
 
         fig = plt.figure(figsize=(6, 5))
         ax = fig.add_subplot(111, projection="3d")
@@ -828,7 +1082,7 @@ def plot_angle_quadrature(sn_orders=(4, 16)):
         ax.scatter(directions[:, 0], directions[:, 1], directions[:, 2],
                    s=26 if sn_order <= 4 else 12, c=directions[:, 2],
                    cmap="coolwarm", depthshade=False)
-        ax.set_title(f"Level-symmetric S{sn_order} ordinates")
+        ax.set_title(f"Level-symmetric S{sn_order} ordinates\n{angular_stats}", fontsize=11)
         ax.set_xlabel(r"$\Omega_x$")
         ax.set_ylabel(r"$\Omega_y$")
         ax.set_zlabel(r"$\Omega_z$")
@@ -845,7 +1099,17 @@ def plot_angle_quadrature(sn_orders=(4, 16)):
                         c=directions[:, 2], cmap="coolwarm")
         ax.set_xlabel(r"$\Omega_x$")
         ax.set_ylabel(r"$\Omega_y$")
-        ax.set_title(f"Level-symmetric S{sn_order}, x-y projection")
+        ax.set_title(f"Level-symmetric S{sn_order}, x-y projection\n{angular_stats}", fontsize=11)
+        ax.text(
+            0.02,
+            0.98,
+            f"order N={sn_order}\nM=N(N+2)={direction_count}",
+            transform=ax.transAxes,
+            va="top",
+            ha="left",
+            fontsize=9,
+            bbox={"facecolor": "white", "edgecolor": "0.75", "alpha": 0.85, "pad": 3},
+        )
         ax.set_aspect("equal", adjustable="box")
         ax.grid(True, alpha=0.35)
         fig.colorbar(sc, ax=ax, label=r"$\Omega_z$")
@@ -865,7 +1129,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Generate all RSI example figures.")
     parser.add_argument(
         "--only",
-        choices=["all", "figure2", "figure5", "slices", "3d", "voxel3d", "layers", "mesh", "angles"],
+        choices=[
+            "all", "figure2", "figure5", "slices", "3d", "voxel3d",
+            "volume3d", "isosurfaces", "paper-slices", "mesh", "angles",
+        ],
         default="all",
         help="Select a subset of figures to generate.",
     )
@@ -885,8 +1152,12 @@ def main(argv=None):
         plot_figure5_3d()
     elif args.only == "voxel3d":
         plot_figure5_voxel3d()
-    elif args.only == "layers":
-        plot_figure5_layers()
+    elif args.only == "volume3d":
+        plot_figure5_volume3d()
+    elif args.only == "isosurfaces":
+        plot_figure5_isosurfaces()
+    elif args.only == "paper-slices":
+        plot_figure5_paper_slices()
     elif args.only == "mesh":
         plot_tetra_mesh()
     elif args.only == "angles":

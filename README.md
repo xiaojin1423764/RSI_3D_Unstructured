@@ -8,23 +8,24 @@ https://github.com/lanl/tycho2
 
 
 其他可修改的参数：(都在/src/main.cpp中)
-angularN : {4,16}//level-symmetric S_N 角向划分，M=N*(N+2)，支持两个数作比较
+Figure 2 收敛阶实验使用 `angularN : {8,16}`，即 level-symmetric S_N 角向划分，M=N*(N+2)，支持多个角度阶数作比较。
 
-当前角向离散使用 level-symmetric S_N 方向集，不再使用 Gauss-Legendre × 均匀方位角。
+当前角向离散使用 `Quadrature::levelSymmetricSN()` 生成的 level-symmetric S_N 方向集，SI 和 RSI 的所有角方向扫掠都共用这一套方向集
+`angularN` 必须是 >=2 的偶数。对 S_N，方向总数为 M=N*(N+2)。
 每个八分区使用 i+j+k=N/2+2 的层对称方向，符号反射到全空间。
 方向权重统一归一化为 1/[N*(N+2)]，满足 sum_m ω_m=1、sum_m ω_m Ω_m=0、sum_m ω_m Ω_{m,x}^2=sum_m ω_m Ω_{m,y}^2=sum_m ω_m Ω_{m,z}^2=1/3。
 
 cfg.groupCount = 2//分组数G，G<=M
 
-cfg.sampleCounts = {2,4,8,16,32,64,128,256,512,1024};//样本数量，可以继续加
+cfg.sampleCounts = {4,8,16,32,64,128,256,512,1024};//样本数量，可以继续加
 
-coarseCfg.angularN = 4;(55行)//粗角度划分，S4 对应 M=24
+coarseCfg.angularN = 4;//Figure 5 粗角度 SI，S4 对应 M=24
 
-fineCfg.angularN = 16;(70行)//细角度划分，S16 对应 M=288，细角度SI，RSI，RSI_tail共用这个参数
+fineCfg.angularN = 32;//Figure 5 细角度 SI、RSI、RSI_tail 共用这个参数，S32 对应 M=1088
 
-fineCfg.groupCount = 2(69行) //细角度分组。注意：这个参数和cfg.groupCount是独立的，用于计算射线效应，cfg.groupCount则用于计算收敛阶，此外只有RSI才会用到这个参数，SI不用分组，因此58行的coarseCfg.groupCount = 1是一个默认参数
+fineCfg.groupCount = 1;//Figure 5 细角度分组。注意：这个参数和 cfg.groupCount 是独立的，用于计算射线效应，cfg.groupCount 则用于计算收敛阶；SI 不用分组，因此 coarseCfg.groupCount = 1 和 fineCfg.groupCount = 1 是默认参数
 
-int S = 256(83行)//计算RSI场数据使用的样本数
+int S = 512;//计算 Figure 5 RSI 场数据使用的样本数
 
 
 修改好后需要重新生成网格并编译运行:
@@ -44,24 +45,31 @@ make run-cir   # circle, 输出 Cir_* 图对应的数据
 make run-rec-figure5  # rectangle, 只输出 Figure 5 数据
 make run-cir-figure5  # circle, 只输出 Figure 5 数据
 make plot      # 只生成 Figure 5 图片
+make plot-voxel3d  # 只生成 Matplotlib voxel 3D 图
+make plot-volume3d  # 只生成 PyVista 半透明体渲染 3D 图
+make plot-isosurfaces  # 只生成 PyVista 多层等值面 3D 图
 make plot-all  # 生成 Figure 2、Figure 5、网格和角度划分图片
 ```
 
 
 
 运行结束之后数据保存到:
-/example/csv_data/figure2_data.csv
-/example/csv_data/figure5_RSI_tail.csv
-/example/csv_data/figure5_RSI.csv
-/example/csv_data/figure5_SI_coarse.csv
-/example/csv_data/figure5_SI_fine.csv
+`examples/csv_data/figure2_data.csv`
+`examples/csv_data/Rec/figure5_RSI_tail.csv`
+`examples/csv_data/Rec/figure5_RSI.csv`
+`examples/csv_data/Rec/figure5_SI_coarse.csv`
+`examples/csv_data/Rec/figure5_SI_fine.csv`
+`examples/csv_data/Cir/figure5_RSI_tail.csv`
+`examples/csv_data/Cir/figure5_RSI.csv`
+`examples/csv_data/Cir/figure5_SI_coarse.csv`
+`examples/csv_data/Cir/figure5_SI_fine.csv`
 对应论文的Figure2 收敛阶和Figure5 射线效应数据
 
 最后运行 /examples/plot_figures.py 生成图片。图片会按入射区域命名：矩形区域前缀为 `Rec`，圆形区域前缀为 `Cir`。
 Figure 5 数据按入射区域分开保存，避免 Rec/Cir 相互覆盖：
 `examples/csv_data/Rec/figure5_*.csv` 和 `examples/csv_data/Cir/figure5_*.csv`。
-`make plot` 会读取已有的 Rec/Cir 数据并分别画图。Figure 5 的 SI coarse、SI fine、RSI、RSI tail 四类场都会输出 y 截面和 layer 堆叠图；voxel 3D 图单独用 `make plot-voxel3d` 生成。例如：
-`Cir_SI_coarse_y0.50.png`、`Cir_SI_coarse_layer_stack.png`、`Cir_SI_coarse_voxel3d_iso_back.png`。
+`make plot` 会读取已有的 Rec/Cir 数据并分别画图。Figure 5 的 SI coarse、SI fine、RSI、RSI tail 四类场都会输出 y 截面和 layer 堆叠图；voxel 3D 图单独用 `make plot-voxel3d` 生成，PyVista 半透明体渲染图单独用 `make plot-volume3d` 生成，多层等值面图单独用 `make plot-isosurfaces` 生成。例如：
+`Cir_SI_coarse_y0.50.png`、`Cir_SI_coarse_layer_stack.png`、`Cir_SI_coarse_voxel3d_iso_back.png`、`Cir_SI_coarse_volume3d_iso_back.png`、`Cir_SI_coarse_isosurface_iso_back.png`。
 
 
 
