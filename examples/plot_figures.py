@@ -23,9 +23,16 @@ from plot_naming import figure_base, source_prefix
 
 BASE_DIR = os.path.dirname(__file__)
 CSV_DIR = os.path.join(BASE_DIR, "csv_data")
+FINE_CSV_DIR = os.path.join(BASE_DIR, "csv_data_finemesh_backup")
+MESH200K_CSV_DIR = os.path.join(BASE_DIR, "csv_data_mesh200k")
 FIGURE_DIR = os.path.join(BASE_DIR, "Figures")
-PAPER_SLICE_DIR = os.path.join(BASE_DIR, "..", "Figure5_paper_slices")
+PAPER_SLICE_DIR = os.path.join(BASE_DIR, "..", "Figure5_paper_slices_coarsemesh")
+FINE_PAPER_SLICE_DIR = os.path.join(BASE_DIR, "..", "Figure5_paper_slices_finemesh")
+MESH200K_PAPER_SLICE_DIR = os.path.join(BASE_DIR, "..", "Figure5_paper_slices_mesh200k")
+GAUSS_FIGURE_DIR = os.path.join(BASE_DIR, "..", "Gauss_figures")
 MSH_FILE = os.path.join(BASE_DIR, "..", "gmsh_work", "example1.msh")
+FINE_MSH_FILE = os.path.join(BASE_DIR, "..", "gmsh_work", "finemesh_backup", "example1.msh")
+MESH200K_MSH_FILE = os.path.join(BASE_DIR, "..", "gmsh_work", "mesh200k", "example1.msh")
 
 FIELD_FILES = [
     ("figure5_SI_fine.csv", "SI fine", "si_fine", "S32, M=1088"),
@@ -37,9 +44,17 @@ SOURCE_CASES = [
     ("Rec", os.path.join(CSV_DIR, "Rec")),
     ("Cir", os.path.join(CSV_DIR, "Cir")),
 ]
+FINE_SOURCE_CASES = [
+    ("Rec", os.path.join(FINE_CSV_DIR, "Rec")),
+    ("Cir", os.path.join(FINE_CSV_DIR, "Cir")),
+]
+MESH200K_SOURCE_CASES = [
+    ("Rec", os.path.join(MESH200K_CSV_DIR, "Rec")),
+    ("Cir", os.path.join(MESH200K_CSV_DIR, "Cir")),
+]
 
 Y_SLICES = [0.00, 0.25, 0.50, 0.75, 1.00]
-PAPER_Y_SLICE_VALUES = [round(0.01 * i, 2) for i in range(21)]
+PAPER_Y_SLICE_VALUES = [round(0.01 * i, 2) for i in range(31)]
 PAPER_SOURCE_CENTER_Z = 0.5
 PAPER_SOURCE_RADIUS = 0.2 / np.sqrt(np.pi)
 PAPER_Z_SLICE_VALUES = [
@@ -58,11 +73,14 @@ FIELD_NORM = PowerNorm(gamma=0.55, vmin=VMIN, vmax=VMAX)
 Y_SLICE_NORM = PowerNorm(gamma=0.35, vmin=0.0, vmax=0.12)
 PAPER_FIGURE5_NORM = PowerNorm(gamma=0.55, vmin=0.0, vmax=2.7)
 PAPER_FIGURE5_LEVELS = np.linspace(0.0, 2.7, 181)
-PAPER_FIGURE5_CMAP = "jet"
+PAPER_FIGURE5_CMAP = "turbo"
 PAPER_SLICE_GRID_N = 260
+PAPER_GAUSS_GRID_N = 360
+PAPER_GAUSS_SIGMA = 1.6
 PAPER_SLICE_IDW_K = 96
 PAPER_SLICE_IDW_POWER = 1.65
-PAPER_SLICE_SMOOTH_SIGMA = 2.2
+PAPER_SLICE_SMOOTH_SIGMA = 0.0
+PAPER_SLICE_TOL = 1.0e-12
 
 VOLUME_GRID_N = 64
 LEGACY_VOXEL_GRID_N = 128
@@ -248,6 +266,211 @@ def interpolate_strict_plane_idw(df, axis, value):
     return coords, coords, field, horizontal, vertical
 
 
+def project_cell_values_to_vertices(tets, cell_values, cell_volumes, n_points):
+    vertex_values = np.zeros(n_points, dtype=float)
+    vertex_weights = np.zeros(n_points, dtype=float)
+    weights = np.repeat(cell_volumes / 4.0, 4)
+    np.add.at(vertex_values, tets.ravel(), np.repeat(cell_values, 4) * weights)
+    np.add.at(vertex_weights, tets.ravel(), weights)
+    valid = vertex_weights > 0.0
+    vertex_values[valid] /= vertex_weights[valid]
+    return vertex_values
+
+
+def slice_tetrahedral_linear_field(points, tets, vertex_values, axis, value):
+    if axis == "z":
+        axis_idx, horizontal_idx, vertical_idx = 2, 0, 1
+        horizontal, vertical = "x", "y"
+    elif axis == "y":
+        axis_idx, horizontal_idx, vertical_idx = 1, 0, 2
+        horizontal, vertical = "x", "z"
+    else:
+        raise ValueError("axis must be 'y' or 'z'")
+
+    triangles = []
+    coords = []
+    values = []
+    vertex_lookup = {}
+    edge_pairs = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+
+    def add_point(point3, point_value):
+        key = tuple(np.round(point3[[horizontal_idx, vertical_idx]], 12))
+        idx = vertex_lookup.get(key)
+        if idx is None:
+            idx = len(coords)
+            vertex_lookup[key] = idx
+            coords.append([point3[horizontal_idx], point3[vertical_idx]])
+            values.append(point_value)
+        return idx
+
+    for tet in tets:
+        ps = points[tet]
+        vals = vertex_values[tet]
+        signed = ps[:, axis_idx] - value
+        if np.all(signed > PAPER_SLICE_TOL) or np.all(signed < -PAPER_SLICE_TOL):
+            continue
+
+        poly = []
+        seen = set()
+        for i, j in edge_pairs:
+            di, dj = signed[i], signed[j]
+            if abs(di) <= PAPER_SLICE_TOL and abs(dj) <= PAPER_SLICE_TOL:
+                for endpoint in (i, j):
+                    idx = add_point(ps[endpoint], vals[endpoint])
+                    if idx not in seen:
+                        seen.add(idx)
+                        poly.append(idx)
+                continue
+            if abs(di) <= PAPER_SLICE_TOL:
+                idx = add_point(ps[i], vals[i])
+            elif abs(dj) <= PAPER_SLICE_TOL:
+                idx = add_point(ps[j], vals[j])
+            elif di * dj < 0.0:
+                t = di / (di - dj)
+                point3 = ps[i] + t * (ps[j] - ps[i])
+                point_value = vals[i] + t * (vals[j] - vals[i])
+                idx = add_point(point3, point_value)
+            else:
+                continue
+
+            if idx not in seen:
+                seen.add(idx)
+                poly.append(idx)
+
+        if len(poly) < 3:
+            continue
+
+        poly_coords = np.asarray([coords[i] for i in poly])
+        center = poly_coords.mean(axis=0)
+        order = np.argsort(np.arctan2(poly_coords[:, 1] - center[1], poly_coords[:, 0] - center[0]))
+        poly = [poly[i] for i in order]
+        for i in range(1, len(poly) - 1):
+            triangles.append([poly[0], poly[i], poly[i + 1]])
+
+    if not triangles:
+        return None, None, None, horizontal, vertical
+
+    return (
+        np.asarray(coords, dtype=float),
+        np.asarray(triangles, dtype=int),
+        np.clip(np.asarray(values, dtype=float), 0.0, None),
+        horizontal,
+        vertical,
+    )
+
+
+def plot_paper_tetra_slice_values(vertex_values, out_path, axis, value, mesh_cache):
+    points, tets = mesh_cache
+    coords, triangles, values, horizontal, vertical = slice_tetrahedral_linear_field(
+        points,
+        tets,
+        vertex_values,
+        axis,
+        value,
+    )
+    if coords is None:
+        return False
+
+    triang = tri.Triangulation(coords[:, 0], coords[:, 1], triangles)
+    fig, ax = plt.subplots(figsize=(4.1, 3.55))
+    mappable = ax.tripcolor(
+        triang,
+        values,
+        shading="gouraud",
+        cmap=PAPER_FIGURE5_CMAP,
+        norm=PAPER_FIGURE5_NORM,
+    )
+    cbar = fig.colorbar(mappable, ax=ax, fraction=0.045, pad=0.02, extend="max")
+    cbar.set_ticks(np.arange(0.5, 2.6, 0.5))
+    cbar.ax.tick_params(labelsize=8, length=2.5, width=0.6)
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(horizontal, fontsize=9)
+    ax.set_ylabel(vertical, fontsize=9)
+    ax.set_xticks(np.arange(0.1, 1.0, 0.1))
+    ax.set_yticks(np.arange(0.1, 1.0, 0.1))
+    ax.tick_params(labelsize=8, length=2.5, width=0.6)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.6)
+
+    fig.tight_layout(pad=0.15)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def plot_paper_tetra_slice_values_gauss(vertex_values, out_path, axis, value, mesh_cache):
+    points, tets = mesh_cache
+    coords, triangles, values, horizontal, vertical = slice_tetrahedral_linear_field(
+        points,
+        tets,
+        vertex_values,
+        axis,
+        value,
+    )
+    if coords is None:
+        return False
+
+    triang = tri.Triangulation(coords[:, 0], coords[:, 1], triangles)
+    interpolator = tri.LinearTriInterpolator(triang, values)
+    grid = np.linspace(0.0, 1.0, PAPER_GAUSS_GRID_N)
+    gh, gv = np.meshgrid(grid, grid, indexing="xy")
+    field = interpolator(gh, gv)
+    if np.ma.isMaskedArray(field):
+        field = field.filled(np.nan)
+    field = np.asarray(field, dtype=float)
+    missing = ~np.isfinite(field)
+    if missing.any():
+        nearest = griddata(coords, values, (gh, gv), method="nearest")
+        field[missing] = nearest[missing]
+    missing = ~np.isfinite(field)
+    if missing.any():
+        field[missing] = 0.0
+    field = gaussian_filter(np.clip(field, 0.0, None), sigma=PAPER_GAUSS_SIGMA, mode="nearest")
+
+    fig, ax = plt.subplots(figsize=(4.1, 3.55))
+    mappable = ax.imshow(
+        field,
+        origin="lower",
+        extent=(0.0, 1.0, 0.0, 1.0),
+        interpolation="bilinear",
+        aspect="equal",
+        cmap=PAPER_FIGURE5_CMAP,
+        norm=PAPER_FIGURE5_NORM,
+    )
+    cbar = fig.colorbar(mappable, ax=ax, fraction=0.045, pad=0.02, extend="max")
+    cbar.set_ticks(np.arange(0.5, 2.6, 0.5))
+    cbar.ax.tick_params(labelsize=8, length=2.5, width=0.6)
+
+    ax.set_xlim(0.0, 1.0)
+    ax.set_ylim(0.0, 1.0)
+    ax.set_aspect("equal", adjustable="box")
+    ax.set_xlabel(horizontal, fontsize=9)
+    ax.set_ylabel(vertical, fontsize=9)
+    ax.set_xticks(np.arange(0.1, 1.0, 0.1))
+    ax.set_yticks(np.arange(0.1, 1.0, 0.1))
+    ax.tick_params(labelsize=8, length=2.5, width=0.6)
+    for spine in ax.spines.values():
+        spine.set_linewidth(0.6)
+
+    fig.tight_layout(pad=0.15)
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return True
+
+
+def plot_paper_tetra_slice(df, out_path, axis, value, mesh_cache):
+    points, tets, cell_volumes = mesh_cache
+    cell_values = df.sort_values("cell_id")["phi0"].to_numpy(dtype=float)
+    if len(cell_values) != len(tets):
+        raise ValueError(f"cell value count {len(cell_values)} does not match tetra count {len(tets)}")
+
+    vertex_values = project_cell_values_to_vertices(tets, cell_values, cell_volumes, len(points))
+    return plot_paper_tetra_slice_values(vertex_values, out_path, axis, value, (points, tets))
+
+
 def plot_paper_field_slice(df, out_path, axis, value):
     xvals, yvals, field, horizontal, vertical = interpolate_strict_plane_idw(df, axis, value)
 
@@ -282,17 +505,17 @@ def plot_paper_field_slice(df, out_path, axis, value):
     return True
 
 
-def available_source_cases():
+def available_source_cases(source_cases=SOURCE_CASES, csv_dir=CSV_DIR):
     cases = []
-    for prefix, source_dir in SOURCE_CASES:
+    for prefix, source_dir in source_cases:
         if all(os.path.exists(source_csv_path(source_dir, file_name)) for file_name, *_ in FIELD_FILES):
             cases.append((prefix, source_dir))
     if cases:
         return cases
 
     prefix = source_prefix()
-    if all(os.path.exists(csv_path(file_name)) for file_name, *_ in FIELD_FILES):
-        return [(prefix, CSV_DIR)]
+    if all(os.path.exists(os.path.join(csv_dir, file_name)) for file_name, *_ in FIELD_FILES):
+        return [(prefix, csv_dir)]
     return []
 
 
@@ -317,23 +540,71 @@ def plot_figure5_slices():
                 )
 
 
-def plot_figure5_paper_slices():
-    for prefix, source_dir in available_source_cases():
+def plot_figure5_paper_slices(
+    source_cases=SOURCE_CASES,
+    csv_dir=CSV_DIR,
+    msh_file=MSH_FILE,
+    paper_slice_dir=PAPER_SLICE_DIR,
+    plotter=plot_paper_tetra_slice_values,
+):
+    points, tets = read_tetra_mesh(msh_file)
+    cell_volumes = tetra_volumes(points, tets)
+    mesh_cache = (points, tets)
+    for prefix, source_dir in available_source_cases(source_cases, csv_dir):
         for file_name, _title, out_dir, _params in FIELD_FILES:
             file_path = source_csv_path(source_dir, file_name)
             df = pd.read_csv(file_path)
+            cell_values = df.sort_values("cell_id")["phi0"].to_numpy(dtype=float)
+            if len(cell_values) != len(tets):
+                raise ValueError(f"cell value count {len(cell_values)} does not match tetra count {len(tets)}")
+            vertex_values = project_cell_values_to_vertices(tets, cell_values, cell_volumes, len(points))
             base = figure_base(file_path, prefix)
-            out_base_dir = os.path.join(PAPER_SLICE_DIR, out_dir)
+            out_base_dir = os.path.join(paper_slice_dir, out_dir)
             ensure_dir(out_base_dir)
 
             for axis, values in [("y", PAPER_Y_SLICE_VALUES), ("z", PAPER_Z_SLICE_VALUES)]:
                 for value in values:
-                    plot_paper_field_slice(
-                        df,
+                    plotter(
+                        vertex_values,
                         os.path.join(out_base_dir, f"{base}_{axis}{value:.2f}_paper.png"),
                         axis,
                         value,
+                        mesh_cache,
                     )
+
+
+def plot_figure5_paper_slices_finemesh():
+    plot_figure5_paper_slices(
+        source_cases=FINE_SOURCE_CASES,
+        csv_dir=FINE_CSV_DIR,
+        msh_file=FINE_MSH_FILE,
+        paper_slice_dir=FINE_PAPER_SLICE_DIR,
+    )
+
+
+def plot_figure5_paper_slices_mesh200k():
+    plot_figure5_paper_slices(
+        source_cases=MESH200K_SOURCE_CASES,
+        csv_dir=MESH200K_CSV_DIR,
+        msh_file=MESH200K_MSH_FILE,
+        paper_slice_dir=MESH200K_PAPER_SLICE_DIR,
+    )
+
+
+def plot_figure5_paper_slices_gauss():
+    configs = [
+        ("coarsemesh", SOURCE_CASES, CSV_DIR, MSH_FILE),
+        ("finemesh", FINE_SOURCE_CASES, FINE_CSV_DIR, FINE_MSH_FILE),
+        ("mesh200k", MESH200K_SOURCE_CASES, MESH200K_CSV_DIR, MESH200K_MSH_FILE),
+    ]
+    for name, source_cases, csv_dir, msh_file in configs:
+        plot_figure5_paper_slices(
+            source_cases=source_cases,
+            csv_dir=csv_dir,
+            msh_file=msh_file,
+            paper_slice_dir=os.path.join(GAUSS_FIGURE_DIR, name),
+            plotter=plot_paper_tetra_slice_values_gauss,
+        )
 
 
 def interpolate_volume(df, grid_n):
@@ -1131,13 +1402,19 @@ def main(argv=None):
         "--only",
         choices=[
             "all", "figure2", "figure5", "slices", "3d", "voxel3d",
-            "volume3d", "isosurfaces", "paper-slices", "mesh", "angles",
+            "volume3d", "isosurfaces", "paper-slices", "paper-slices-gauss", "mesh", "angles",
         ],
         default="all",
         help="Select a subset of figures to generate.",
     )
     parser.add_argument("--show-figure2", action="store_true",
                         help="Show Figure 2 windows after saving.")
+    parser.add_argument(
+        "--paper-mesh",
+        choices=["coarse", "fine", "mesh200k"],
+        default="coarse",
+        help="Select mesh/data set for --only paper-slices.",
+    )
     args = parser.parse_args(argv)
 
     if args.only == "all":
@@ -1157,7 +1434,14 @@ def main(argv=None):
     elif args.only == "isosurfaces":
         plot_figure5_isosurfaces()
     elif args.only == "paper-slices":
-        plot_figure5_paper_slices()
+        if args.paper_mesh == "fine":
+            plot_figure5_paper_slices_finemesh()
+        elif args.paper_mesh == "mesh200k":
+            plot_figure5_paper_slices_mesh200k()
+        else:
+            plot_figure5_paper_slices()
+    elif args.only == "paper-slices-gauss":
+        plot_figure5_paper_slices_gauss()
     elif args.only == "mesh":
         plot_tetra_mesh()
     elif args.only == "angles":

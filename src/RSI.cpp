@@ -96,15 +96,27 @@ std::vector<std::vector<double>> RSISolver::runSI(int& convergedN) const {
 
     // 预计算散射核矩阵 K[k][m]
     auto K = precomputeKernel();
+    std::vector<SweepPlan> sweepPlans;
+    sweepPlans.reserve(M);
+    for (const auto& ord : ordinates_) {
+        sweepPlans.push_back(sweep_.buildSweepPlan(ord.omega));
+    }
 
 
     // phi[m][i] 表示：
     // 第 m 个方向、第 i 个 cell 上的散射源 phi_m，初始设为 0
-    std::vector<std::vector<double>> phi(M, std::vector<double>(C, 0.0));
+    std::vector<std::vector<double>> phi;
+    std::vector<double> isotropicPhi(C, 0.0);
+    if (cfg_.scattering != "isotropic") {
+        phi.assign(M, std::vector<double>(C, 0.0));
+    }
 
-    // psi[m][i] 表示：第 m 个方向、第 i 个 cell 上的角通量 psi_m
-    // 每次 SI 迭代中，psi 会通过 sweep_.solveDirection 重新计算
-    std::vector<std::vector<double>> psi(M, std::vector<double>(C, 0.0));
+    // psi[m][i] 表示：第 m 个方向、第 i 个 cell 上的角通量 psi_m。
+    // 各向同性散射只需要当前迭代的 phi0，不需要同时保存所有方向的 psi。
+    std::vector<std::vector<double>> psi;
+    if (cfg_.scattering != "isotropic") {
+        psi.assign(M, std::vector<double>(C, 0.0));
+    }
 
     // 保存每次 SI 迭代得到的零阶矩 phi0
     // phi0_i = sum_m w_m psi_{m,i}
@@ -112,26 +124,42 @@ std::vector<std::vector<double>> RSISolver::runSI(int& convergedN) const {
     std::vector<std::vector<double>> phi0History;
 
     for (int it = 1; it <= cfg_.maxSIters; ++it) {
-        // 对所有角方向做非结构网格输运扫掠
-        // 对每个方向 m，求解：
-        //     Omega_m · grad psi_m + Sigma_T psi_m
-        //       = Sigma_S phi_m_old + Q
-        // 这里 phi[m] 是上一轮得到的散射源
-        // solveDirection 返回该方向在所有 cell 上的 psi
-        for (int m = 0; m < M; ++m) psi[m] = sweep_.solveDirection(ordinates_[m], phi[m]);
-
-        std::vector<std::vector<double>> newPhi(M, std::vector<double>(C, 0.0));
         std::vector<double> phi0(C, 0.0);
-        for (int i = 0; i < C; ++i) {
+        if (cfg_.scattering == "isotropic") {
             for (int m = 0; m < M; ++m) {
-                double v = 0.0;
-                // 根据 DOM 散射项离散公式：
-                // phi_m = sum_k w_k K_{k,m} psi_k
-                // 这里 k 是入射方向索引
-                for (int k = 0; k < M; ++k) v += ordinates_[k].weight * K[k][m] * psi[k][i];
-                newPhi[m][i] = v;
-                phi0[i] += ordinates_[m].weight * psi[m][i];
+                std::vector<double> psiM =
+                    sweep_.solveDirectionWithPlan(ordinates_[m], isotropicPhi, sweepPlans[m]);
+                const double weight = ordinates_[m].weight;
+                for (int i = 0; i < C; ++i) {
+                    phi0[i] += weight * psiM[i];
+                }
             }
+            isotropicPhi = phi0;
+        } else {
+            // 对所有角方向做非结构网格输运扫掠
+            // 对每个方向 m，求解：
+            //     Omega_m · grad psi_m + Sigma_T psi_m
+            //       = Sigma_S phi_m_old + Q
+            // 这里 phi[m] 是上一轮得到的散射源
+            // solveDirection 返回该方向在所有 cell 上的 psi
+            for (int m = 0; m < M; ++m) {
+                psi[m] = sweep_.solveDirectionWithPlan(ordinates_[m], phi[m], sweepPlans[m]);
+            }
+
+            std::vector<std::vector<double>> newPhi(M, std::vector<double>(C, 0.0));
+            for (int i = 0; i < C; ++i) {
+                for (int m = 0; m < M; ++m) {
+                    double v = 0.0;
+                    // 根据 DOM 散射项离散公式：
+                    // phi_m = sum_k w_k K_{k,m} psi_k
+                    // 这里 k 是入射方向索引
+                    for (int k = 0; k < M; ++k) v += ordinates_[k].weight * K[k][m] * psi[k][i];
+                    newPhi[m][i] = v;
+                    phi0[i] += ordinates_[m].weight * psi[m][i];
+                }
+            }
+            // 把本轮更新得到的newPhi作为下一轮的旧散射源phi
+            phi = std::move(newPhi);
         }
         phi0History.push_back(phi0);
 
@@ -151,8 +179,6 @@ std::vector<std::vector<double>> RSISolver::runSI(int& convergedN) const {
                 return phi0History;
             }
         }
-        // 把本轮更新得到的newPhi作为下一轮的旧散射源phi
-        phi = std::move(newPhi);
     }
     convergedN = cfg_.maxSIters;
     return phi0History;
@@ -180,6 +206,11 @@ double RSISolver::runRSIErrorAtN(const std::vector<std::vector<double>>& siPhi0H
     const int G = cfg_.groupCount;
 
     auto K = precomputeKernel();
+    std::vector<SweepPlan> sweepPlans;
+    sweepPlans.reserve(M);
+    for (const auto& ord : ordinates_) {
+        sweepPlans.push_back(sweep_.buildSweepPlan(ord.omega));
+    }
     auto groups = makeGroups(M, G);
     
     //创建随机数
@@ -259,7 +290,7 @@ double RSISolver::runRSIErrorAtN(const std::vector<std::vector<double>>& siPhi0H
                     }
                 }
 
-                curPsi.push_back(sweep_.solveDirection(ordinates_[m], source));
+                curPsi.push_back(sweep_.solveDirectionWithPlan(ordinates_[m], source, sweepPlans[m]));
             }
 
             // 目标步 N：计算零阶矩估计
@@ -365,12 +396,22 @@ std::vector<double> RSISolver::runRSIFieldAtN(
     const int G = cfg_.groupCount;
 
     auto K = precomputeKernel();
+    std::vector<SweepPlan> sweepPlans;
+    sweepPlans.reserve(M);
+    for (const auto& ord : ordinates_) {
+        sweepPlans.push_back(sweep_.buildSweepPlan(ord.omega));
+    }
 
 
     // 将 M 个方向划分成 G 个 group。
     // groups[g] 是第 g 个方向组，里面存放方向编号。
     // RSI 每一步会从每个 group 中随机选择一个方向
     auto groups = makeGroups(M, G);
+    std::vector<double> groupUniformProb;
+    groupUniformProb.reserve(groups.size());
+    for (const auto& group : groups) {
+        groupUniformProb.push_back(1.0 / static_cast<double>(group.size()));
+    }
 
     std::mt19937 rng(cfg_.seed + 17u * static_cast<unsigned>(M));
 
@@ -408,12 +449,14 @@ std::vector<double> RSISolver::runRSIFieldAtN(
             // c[m] 对应论文式 (2.2)：
             //      c_m^(n-1) = sum_{k in V^(n-1)} omega_k K_{k,m}
             // 它描述上一轮选中的方向集合对当前候选方向 m 的散射贡献强度
-            std::vector<double> c(M, 0.0);
-
-            // 对每个候选方向m计算 c_m
-            for (int m = 0; m < M; ++m) {
-                for (int k : prevSet) {
-                    c[m] += ordinates_[k].weight * K[k][m];
+            std::vector<double> c;
+            if (cfg_.scattering != "isotropic") {
+                c.assign(M, 0.0);
+                // 对每个候选方向m计算 c_m
+                for (int m = 0; m < M; ++m) {
+                    for (int k : prevSet) {
+                        c[m] += ordinates_[k].weight * K[k][m];
+                    }
                 }
             }
 
@@ -428,7 +471,17 @@ std::vector<double> RSISolver::runRSIFieldAtN(
             //         /
             //         sum_{m' in V(m)} omega_m' c_m'^(n-1)
             // 其中 V(m) 是方向 m 所在的 group
-            for (const auto& group : groups) {
+            for (size_t gi = 0; gi < groups.size(); ++gi) {
+                const auto& group = groups[gi];
+                if (cfg_.scattering == "isotropic") {
+                    std::vector<double> probs(group.size(), groupUniformProb[gi]);
+                    std::discrete_distribution<int> dist(probs.begin(), probs.end());
+                    int cur = group[dist(rng)];
+                    curSet.push_back(cur);
+                    curProb[cur] = groupUniformProb[gi];
+                    continue;
+                }
+
                 std::vector<double> probs;
                 probs.reserve(group.size());
 
@@ -490,7 +543,9 @@ std::vector<double> RSISolver::runRSIFieldAtN(
                         // 所以：
                         //     coef = omega_k K_{k,m} / pk
 
-                        double coef = ordinates_[k].weight * K[k][m] / pk;
+                        double coef = (cfg_.scattering == "isotropic")
+                            ? ordinates_[k].weight / pk
+                            : ordinates_[k].weight * K[k][m] / pk;
 
                         for (int i = 0; i < C; ++i) {
                             source[i] += coef * prevPsi[a][i];
@@ -506,7 +561,7 @@ std::vector<double> RSISolver::runRSIFieldAtN(
                 //     Omega_m · grad psi_m + Sigma_T psi_m
                 //       = Sigma_S source + Q
                 // 返回当前方向在所有 cell 上的 psi
-                curPsi.push_back(sweep_.solveDirection(ordinates_[m], source));
+                curPsi.push_back(sweep_.solveDirectionWithPlan(ordinates_[m], source, sweepPlans[m]));
             }
 
 

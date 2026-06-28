@@ -345,6 +345,23 @@ std::vector<double> TransportSweep::solveDirection(
     const Ordinate& ord,
     const std::vector<double>& source_phi
 ) const {
+    return solveDirectionWithPlan(ord, source_phi, buildSweepPlan(ord.omega));
+}
+
+
+SweepPlan TransportSweep::buildSweepPlan(const Vec3& omega) const {
+    SweepPlan plan;
+    plan.order = buildSweepOrder(omega);
+    plan.hasCycle = hasSweepCycle(mesh_, omega);
+    return plan;
+}
+
+
+std::vector<double> TransportSweep::solveDirectionWithPlan(
+    const Ordinate& ord,
+    const std::vector<double>& source_phi,
+    const SweepPlan& plan
+) const {
     const int C = static_cast<int>(mesh_.cells.size());
 
     if (static_cast<int>(source_phi.size()) != C) {
@@ -360,15 +377,9 @@ std::vector<double> TransportSweep::solveDirection(
     // 但 fallback 实际不依赖 done。
     std::vector<char> done(C, 0);
 
-    // 构造当前方向的 sweep 顺序。
-    auto order = buildSweepOrder(ord.omega);
-
-    // 判断是否存在方向依赖环。
-    bool cycle = hasSweepCycle(mesh_, ord.omega);
-
-    if (!cycle) {
+    if (!plan.hasCycle) {
         // 无环：严格拓扑 sweep，只扫一遍。
-        for (int ci : order) {
+        for (int ci : plan.order) {
             psi[ci] = updateOneCellFV(
                 mesh_,
                 ord,
@@ -396,7 +407,7 @@ std::vector<double> TransportSweep::solveDirection(
         double maxDiff = 0.0;
         double maxVal = 0.0;
 
-        for (int ci : order) {
+        for (int ci : plan.order) {
             double oldVal = psi[ci];
 
             psi[ci] = updateOneCellFV(

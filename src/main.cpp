@@ -17,13 +17,18 @@ static std::string sourcePrefix(const std::string& sourceShape) {
     throw std::runtime_error("sourceShape 必须是 rectangle 或 circle");
 }
 
-static void writeSourceShapeFile(const std::string& sourceShape) {
-    std::ofstream fout("examples/csv_data/source_shape.txt");
+static void writeSourceShapeFile(const std::string& sourceShape, const std::string& figure5Dir) {
+    std::filesystem::create_directories(figure5Dir);
+    std::ofstream fout(figure5Dir + "/source_shape.txt");
     fout << sourceShape << '\n';
 }
 
-static std::string figure5OutputPath(const std::string& figurePrefix, const std::string& fileName) {
-    const std::string dir = "examples/csv_data/" + figurePrefix;
+static std::string figure5OutputPath(
+    const std::string& figure5Dir,
+    const std::string& figurePrefix,
+    const std::string& fileName
+) {
+    const std::string dir = figure5Dir + "/" + figurePrefix;
     std::filesystem::create_directories(dir);
     return dir + "/" + fileName;
 }
@@ -32,13 +37,14 @@ static void printUsage(const char* prog) {
     std::cerr
         << "用法:\n"
         << "  " << prog << " [cells.csv faces.csv [figure2_data.csv] [rectangle|circle]]\n"
-        << "  " << prog << " --source-shape rectangle|circle [--out figure2_data.csv] [--only all|figure2|figure5] [cells.csv faces.csv]\n";
+        << "  " << prog << " --source-shape rectangle|circle [--out figure2_data.csv] [--figure5-dir examples/csv_data] [--only all|figure2|figure5] [cells.csv faces.csv]\n";
 }
 
 int main(int argc, char** argv) {
     std::string cellsFile = "data/cells.csv";
     std::string facesFile = "data/faces.csv";
     std::string outFile = "examples/figure2_data.csv";
+    std::string figure5Dir = "examples/csv_data";
     std::string sourceShape = "rectangle";
     std::string only = "all";
 
@@ -57,6 +63,12 @@ int main(int argc, char** argv) {
                 return 1;
             }
             outFile = argv[++i];
+        } else if (arg == "--figure5-dir") {
+            if (i + 1 >= argc) {
+                printUsage(argv[0]);
+                return 1;
+            }
+            figure5Dir = argv[++i];
         } else if (arg == "--only") {
             if (i + 1 >= argc) {
                 printUsage(argv[0]);
@@ -101,7 +113,7 @@ int main(int argc, char** argv) {
         }
 
         Mesh mesh = Mesh::readCSV(cellsFile, facesFile);
-        writeSourceShapeFile(sourceShape);
+        writeSourceShapeFile(sourceShape, figure5Dir);
         const std::string figurePrefix = sourcePrefix(sourceShape);
         std::cout << "入射区域形状: " << sourceShape << " (" << figurePrefix << ")\n";
 
@@ -150,10 +162,10 @@ int main(int argc, char** argv) {
             RSISolver coarseSolver(mesh, coarseCfg);
             int Ncoarse = 0;
             auto phiSIcoarse = coarseSolver.runSIField(Ncoarse);
-            const std::string siCoarseFile = figure5OutputPath(figurePrefix, "figure5_SI_coarse.csv");
-            const std::string siFineFile = figure5OutputPath(figurePrefix, "figure5_SI_fine.csv");
-            const std::string rsiFile = figure5OutputPath(figurePrefix, "figure5_RSI.csv");
-            const std::string rsiTailFile = figure5OutputPath(figurePrefix, "figure5_RSI_tail.csv");
+            const std::string siCoarseFile = figure5OutputPath(figure5Dir, figurePrefix, "figure5_SI_coarse.csv");
+            const std::string siFineFile = figure5OutputPath(figure5Dir, figurePrefix, "figure5_SI_fine.csv");
+            const std::string rsiFile = figure5OutputPath(figure5Dir, figurePrefix, "figure5_RSI.csv");
+            const std::string rsiTailFile = figure5OutputPath(figure5Dir, figurePrefix, "figure5_RSI_tail.csv");
             RSISolver::writeFieldCSV(siCoarseFile, mesh, phiSIcoarse);
 
             // 细角度SI
