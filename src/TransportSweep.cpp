@@ -188,23 +188,31 @@ double TransportSweep::boundaryInflow(const Face& face, const Vec3& omega) const
             0.2 / std::sqrt(pi);
 
         const bool onBottomFace = std::fabs(face.center.y) < 1e-10;
-        bool inSourceWindow = false;
+        double sourceFraction = 0.0;
 
         if (sourceShape_ == "rectangle") {
-            inSourceWindow =
+            sourceFraction =
                 std::fabs(face.center.x - sourceCenterX) <= rectangleHalfLengthX &&
-                std::fabs(face.center.z - sourceCenterZ) <= rectangleHalfWidthZ;
+                std::fabs(face.center.z - sourceCenterZ) <= rectangleHalfWidthZ
+                    ? 1.0
+                    : 0.0;
         } else if (sourceShape_ == "circle") {
-            const double dx = face.center.x - sourceCenterX;
-            const double dz = face.center.z - sourceCenterZ;
-            inSourceWindow = dx * dx + dz * dz <=
-                equivalentCircleRadius * equivalentCircleRadius;
+            sourceFraction = face.source_fraction;
+
+            // Backward compatibility for old faces.csv files that do not carry a
+            // circle overlap fraction: use the previous face-center test.
+            if (sourceFraction >= 1.0) {
+                const double dx = face.center.x - sourceCenterX;
+                const double dz = face.center.z - sourceCenterZ;
+                sourceFraction = dx * dx + dz * dz <=
+                    equivalentCircleRadius * equivalentCircleRadius ? 1.0 : 0.0;
+            }
         } else {
             throw std::runtime_error("TransportSweep: sourceShape 必须是 rectangle 或 circle");
         }
 
-        if (onBottomFace && omega.y > 0.0 && inSourceWindow) {
-            return 10.0 *
+        if (onBottomFace && omega.y > 0.0 && sourceFraction > 0.0) {
+            return sourceFraction * 10.0 *
                    std::exp(-omega.x * omega.x - omega.y * omega.y - omega.z * omega.z);
         }
 

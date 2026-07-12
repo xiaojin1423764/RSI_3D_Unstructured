@@ -48,6 +48,7 @@ make plot      # 只生成 Figure 5 图片
 make plot-voxel3d  # 只生成 Matplotlib voxel 3D 图
 make plot-volume3d  # 只生成 PyVista 半透明体渲染 3D 图
 make plot-isosurfaces  # 只生成 PyVista 多层等值面 3D 图
+make tecplot  # 导出 Tecplot ASCII DAT 非结构四面体场数据
 make plot-all  # 生成 Figure 2、Figure 5、网格和角度划分图片
 ```
 
@@ -70,6 +71,22 @@ Figure 5 数据按入射区域分开保存，避免 Rec/Cir 相互覆盖：
 `examples/csv_data/Rec/figure5_*.csv` 和 `examples/csv_data/Cir/figure5_*.csv`。
 `make plot` 会读取已有的 Rec/Cir 数据并分别画图。Figure 5 的 SI coarse、SI fine、RSI、RSI tail 四类场都会输出 y 截面和 layer 堆叠图；voxel 3D 图单独用 `make plot-voxel3d` 生成，PyVista 半透明体渲染图单独用 `make plot-volume3d` 生成，多层等值面图单独用 `make plot-isosurfaces` 生成。例如：
 `Cir_SI_coarse_y0.50.png`、`Cir_SI_coarse_layer_stack.png`、`Cir_SI_coarse_voxel3d_iso_back.png`、`Cir_SI_coarse_volume3d_iso_back.png`、`Cir_SI_coarse_isosurface_iso_back.png`。
+
+也可以把 Figure 5 的非结构四面体场数据导出给 Tecplot：
+
+```bash
+make tecplot
+```
+
+默认输出到 `examples/tecplot/Rec/*.dat` 和 `examples/tecplot/Cir/*.dat`。每个文件都是 Tecplot ASCII `FETETRAHEDRON` zone，`X/Y/Z` 为节点坐标，`phi0` 和 `cell_id` 为 cell-centered 变量。Tecplot 中打开 `.dat` 后可直接对 `phi0` 做 contour、slice、iso-surface 或体渲染。
+
+如果要导出单个文件：
+
+```bash
+python3 examples/export_tecplot.py \
+  --csv examples/csv_data/Rec/figure5_RSI.csv \
+  --out examples/tecplot/Rec/figure5_RSI.dat
+```
 
 
 

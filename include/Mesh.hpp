@@ -32,6 +32,7 @@ struct Face {
     Vec3 center;
     std::string bc_type = "vacuum"; // internal/vacuum/example1/inflow
     double bc_value = 0.0;
+    double source_fraction = 1.0; // boundary source area fraction inside the prescribed window
 };
 
 class Mesh {

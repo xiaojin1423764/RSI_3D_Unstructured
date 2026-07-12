@@ -46,5 +46,8 @@ plot-paper-slices:
 
 plot-all:
 	python3 examples/plot_figures.py
+
+tecplot:
+	python3 examples/export_tecplot.py
 clean:
 	rm -f $(TARGET)

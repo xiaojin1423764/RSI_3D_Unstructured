@@ -31,6 +31,53 @@ def tri_area_normal(p0, p1, p2):
         raise RuntimeError("发现零面积三角面")
     return area, n / np.linalg.norm(n)
 
+SOURCE_CENTER_X = 0.5
+SOURCE_CENTER_Z = 0.5
+EQUIVALENT_CIRCLE_RADIUS = 0.2 / np.sqrt(np.pi)
+OVERLAP_QUAD_N = 32
+
+def triangle_circle_area_fraction(p0, p1, p2):
+    """Approximate area fraction of a bottom triangle inside the circular source.
+
+    The bottom boundary triangles lie in the x-z plane. A fixed barycentric
+    midpoint rule keeps this deterministic and avoids optional geometry
+    dependencies. For the current boundary mesh sizes, 32 subdivisions gives a
+    stable source area while retaining fractional cut faces.
+    """
+    pts = np.array(
+        [
+            [p0[0], p0[2]],
+            [p1[0], p1[2]],
+            [p2[0], p2[2]],
+        ],
+        dtype=float,
+    )
+    inside = 0
+    total = 0
+    n = OVERLAP_QUAD_N
+    r2 = EQUIVALENT_CIRCLE_RADIUS * EQUIVALENT_CIRCLE_RADIUS
+
+    for i in range(n):
+        for j in range(n - i):
+            # First small barycentric triangle.
+            b0 = np.array([i / n, j / n, 1.0 - (i + j) / n])
+            b1 = np.array([(i + 1) / n, j / n, 1.0 - (i + 1 + j) / n])
+            b2 = np.array([i / n, (j + 1) / n, 1.0 - (i + j + 1) / n])
+            for b in [(b0 + b1 + b2) / 3.0]:
+                x, z = b @ pts
+                inside += int((x - SOURCE_CENTER_X) ** 2 + (z - SOURCE_CENTER_Z) ** 2 <= r2)
+                total += 1
+
+            if i + j < n - 1:
+                # Second small barycentric triangle in the same square.
+                b3 = np.array([(i + 1) / n, (j + 1) / n, 1.0 - (i + j + 2) / n])
+                for b in [(b1 + b2 + b3) / 3.0]:
+                    x, z = b @ pts
+                    inside += int((x - SOURCE_CENTER_X) ** 2 + (z - SOURCE_CENTER_Z) ** 2 <= r2)
+                    total += 1
+
+    return inside / total
+
 cell_centers = []
 cell_volumes = []
 
@@ -66,7 +113,7 @@ for ci, tet in enumerate(tets):
         face_map[key].append((ci, face_nodes))
 
 with open(faces_csv, "w") as f:
-    f.write("face_id,left_cell,right_cell,nx,ny,nz,area,fx,fy,fz,bc_type,bc_value\n")
+    f.write("face_id,left_cell,right_cell,nx,ny,nz,area,fx,fy,fz,bc_type,bc_value,source_fraction\n")
 
     fid = 0
     for key, owners in face_map.items():
@@ -84,10 +131,15 @@ with open(faces_csv, "w") as f:
             target = cell_centers[right] - left_center
             bc_type = "internal"
             bc_value = 0.0
+            source_fraction = 1.0
         else:
             target = center - left_center
             bc_type = "example1"
             bc_value = 0.0
+            if abs(center[1]) < 1e-10:
+                source_fraction = triangle_circle_area_fraction(p0, p1, p2)
+            else:
+                source_fraction = 0.0
 
         if np.dot(n, target) < 0:
             n = -n
@@ -96,7 +148,7 @@ with open(faces_csv, "w") as f:
             f"{fid},{left},{right},"
             f"{n[0]},{n[1]},{n[2]},"
             f"{area},{center[0]},{center[1]},{center[2]},"
-            f"{bc_type},{bc_value}\n"
+            f"{bc_type},{bc_value},{source_fraction}\n"
         )
         fid += 1
 

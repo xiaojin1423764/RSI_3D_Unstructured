@@ -67,7 +67,7 @@ Mesh Mesh::readCSV(const std::string& cellsFile, const std::string& facesFile) {
         mesh.cells.push_back(c);
     }
 
-    // faces.csv 格式：face_id,left_cell,right_cell,nx,ny,nz,area,fx,fy,fz,bc_type,bc_value
+    // faces.csv 格式：face_id,left_cell,right_cell,nx,ny,nz,area,fx,fy,fz,bc_type,bc_value[,source_fraction]
     //face_id     : 面编号，可以不连续，但必须唯一
     // left_cell  : 面左侧单元编号，必须有效
     // right_cell : 面右侧单元编号；如果为 -1，表示这是边界面
@@ -76,6 +76,7 @@ Mesh Mesh::readCSV(const std::string& cellsFile, const std::string& facesFile) {
     // fx,fy,fz   : 面中心坐标
     // bc_type    : 边界类型，例如 vacuum、inflow、example1_inflow、internal
     // bc_value   : 边界给定值
+    // source_fraction : 可选，边界面落入源区域的面积比例；旧文件无此列时取 1
 
     std::ifstream finFile(facesFile);
     if (!finFile) throw std::runtime_error("无法打开 faces.csv: " + facesFile);
@@ -95,6 +96,7 @@ Mesh Mesh::readCSV(const std::string& cellsFile, const std::string& facesFile) {
         f.center = {std::stod(t[7]), std::stod(t[8]), std::stod(t[9])};
         f.bc_type = trim(t[10]);
         f.bc_value = std::stod(t[11]);
+        f.source_fraction = (t.size() >= 13) ? std::stod(t[12]) : 1.0;
 
         // 建立 face_id 到 faces 数组下标的映射
         mesh.faceIdToIndex[f.id] = static_cast<int>(mesh.faces.size());
