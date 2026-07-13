@@ -11,6 +11,7 @@
 | CPU | 266.32 s | `gmsh_work/data`，36,470 cells |
 | GPU direct-global-tail 版本 | 145.23 s | 数值逐 CSV 一致，但比旧 GPU 基线慢 |
 | GPU SI cycle-run + 5M direction batch | 75.27 s | `NVCCARCH=sm_120`，快于旧 GPU 基线 89.83 s |
+| GPU 分阶段计时版 | 78.86 s | 计时事件有少量同步开销；用于定位瓶颈 |
 
 CPU/GPU 四个 CSV (`SI_coarse`、`SI_fine`、`RSI`、`RSI_tail`) 对比为逐值一致，plain relative L2 和 max abs 均为 0。
 
@@ -79,6 +80,69 @@ direct-global-tail 版本的问题：
 ```text
 CUDA timing: upload=... si_total=... si_sweep=... si_reduce=... rsi_total=...
 ```
+
+计时完成后的决策规则：
+
+- 如果 `si_clear + si_reduce + si_norm` 占 SI 比例高，优先做 SI direction streaming
+  和 reduce/norm 融合。
+- 如果 `si_sweep` 仍占绝大部分，优先研究 CUDA Graph、持久 kernel 或 cell-level /
+  wavefront 并行 sweep。
+- 如果 `rsi_sweep` 占比高，优先优化 sample chain sweep 和 cyclic pass 策略。
+- 如果 `rsi_tail_accum + rsi_reduce` 占比高，优先做 RSI batch 自适应和 tail/reduce
+  kernel 融合。
+- 如果 `rsi_direction_copy` 或 checkpoint 时间异常，优先处理 Host/Device 传输和
+  checkpoint 频率。
+
+下一步先跑 30k 完整 Figure 5 确认 75.27 s 版本的阶段占比，再跑 200k 完整
+Figure 5 判断大网格瓶颈是否相同。不要在没有阶段占比前继续改 kernel。
+
+30k 分阶段计时结果：
+
+| 阶段 | 时间 |
+|---|---:|
+| upload | 0.26 s |
+| SI total | 37.01 s |
+| SI sweep | 35.94 s |
+| SI clear | 0.007 s |
+| SI reduce | 0.006 s |
+| SI norm | 0.004 s |
+| RSI total | 41.58 s |
+| RSI sweep | 40.30 s |
+| RSI tail accumulate | 0.007 s |
+| RSI reduce | 0.001 s |
+| RSI direction copy | 0.001 s |
+
+30k 结论：剩余瓶颈几乎全部在 sweep kernel 本体，`angularPsi` 清零、方向归约、
+收敛范数、tail accumulation 和 Host/Device 拷贝都不是主要瓶颈。若 200k 也呈现
+相同占比，下一步应优先做 sweep kernel / pass 结构优化或 CUDA Graph，而不是 SI
+streaming。
+
+200k 分阶段计时结果：
+
+| 阶段 | 时间 |
+|---|---:|
+| upload | 0.60 s |
+| SI total | 380.75 s |
+| SI sweep | 369.72 s |
+| SI clear | 0.033 s |
+| SI reduce | 0.031 s |
+| SI norm | 0.009 s |
+| RSI total | 65.72 s |
+| RSI sweep | 63.66 s |
+| RSI tail accumulate | 0.035 s |
+| RSI reduce | 0.002 s |
+| RSI direction copy | 0.005 s |
+
+200k 结论：完整 GPU Figure 5 为 `447.08 s`（`/usr/bin/time` wall 为 `460.03 s`），
+相比旧 GPU 基线 `1417.84 s` 已明显下降。瓶颈仍然几乎全部在 sweep kernel：
+SI sweep 占总时间约 82.7%，RSI sweep 占约 14.2%。因此下一步不应优先做
+SI streaming、reduce/norm 融合或传输优化，而应优先减少 RSI/SI sweep 的无效
+pass 和 kernel launch，随后再评估 CUDA Graph 或 sweep kernel 并行粒度重构。
+
+已验证但不保留的 RSI pass 尝试：按每个 RSI batch/iteration 的 selected
+directions 判断是否存在 cyclic direction；若没有则只 launch 1 pass。30k 完整
+Figure 5 变为 `80.62 s`，慢于分阶段计时基线 `78.86 s`，因此已回退。后续不要
+重复这个 batch 级 RSI pass 判断，除非能按 sample 子组更细粒度处理 cyclic 样本。
 
 ## 优先级 3：跳过无环方向的空 localPass
 

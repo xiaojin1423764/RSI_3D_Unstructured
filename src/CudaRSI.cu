@@ -26,6 +26,41 @@ void checkCuda(cudaError_t status, const char* operation) {
     throw std::runtime_error(out.str());
 }
 
+double secondsBetween(
+    std::chrono::steady_clock::time_point begin,
+    std::chrono::steady_clock::time_point end
+) {
+    return std::chrono::duration<double>(end - begin).count();
+}
+
+struct CudaEventTimer {
+    cudaEvent_t begin = nullptr;
+    cudaEvent_t end = nullptr;
+
+    CudaEventTimer() {
+        checkCuda(cudaEventCreate(&begin), "create CUDA timing begin event");
+        checkCuda(cudaEventCreate(&end), "create CUDA timing end event");
+    }
+    CudaEventTimer(const CudaEventTimer&) = delete;
+    CudaEventTimer& operator=(const CudaEventTimer&) = delete;
+    ~CudaEventTimer() {
+        if (begin) cudaEventDestroy(begin);
+        if (end) cudaEventDestroy(end);
+    }
+
+    void start() {
+        checkCuda(cudaEventRecord(begin), "record CUDA timing begin event");
+    }
+
+    double stop(const char* operation) {
+        checkCuda(cudaEventRecord(end), operation);
+        checkCuda(cudaEventSynchronize(end), operation);
+        float milliseconds = 0.0f;
+        checkCuda(cudaEventElapsedTime(&milliseconds, begin, end), operation);
+        return static_cast<double>(milliseconds) * 1.0e-3;
+    }
+};
+
 template <typename T>
 struct DeviceArray {
     T* ptr = nullptr;
@@ -637,7 +672,11 @@ CudaFigure5Result runFigure5Cuda(
     }
 
     const auto totalStart = std::chrono::steady_clock::now();
+    const auto uploadStart = std::chrono::steady_clock::now();
     std::unique_ptr<DeviceProblem> problem = uploadProblem(mesh, ordinates, sweepPlans);
+    checkCuda(cudaDeviceSynchronize(), "synchronize CUDA problem upload");
+    const double uploadSeconds =
+        secondsBetween(uploadStart, std::chrono::steady_clock::now());
     const int C = problem->cellCount;
     const int M = problem->directionCount;
     const int sourceShapeCode = sourceShape == "rectangle" ? 0 : 1;
@@ -652,9 +691,18 @@ CudaFigure5Result runFigure5Cuda(
     const std::string rsiCheckpointPath = checkpointPrefix + ".rsi.bin";
 
     CudaFigure5Result result;
+    CudaEventTimer gpuTimer;
+    double siTotalSeconds = 0.0;
+    double siClearSeconds = 0.0;
+    double siSweepSeconds = 0.0;
+    double siReduceSeconds = 0.0;
+    double siNormSeconds = 0.0;
+    double siCopySeconds = 0.0;
+    double siCheckpointSeconds = 0.0;
 
     // SI fine: all angular directions are independent within one source iteration.
     {
+        const auto siStart = std::chrono::steady_clock::now();
         const std::size_t angularValueCount = static_cast<std::size_t>(M) * C;
         DeviceArray<double> angularPsi, phiA, phiB, normValues;
         angularPsi.allocate(angularValueCount);
@@ -686,8 +734,12 @@ CudaFigure5Result runFigure5Cuda(
         double* currentPhi = phiB.ptr;
         for (int iteration = firstIteration;
              iteration <= maxSIters && !siAlreadyConverged; ++iteration) {
+            gpuTimer.start();
             checkCuda(cudaMemset(angularPsi.ptr, 0, angularValueCount * sizeof(double)),
                       "clear CUDA SI angular field");
+            siClearSeconds += gpuTimer.stop("time CUDA SI angular clear");
+
+            gpuTimer.start();
             const int directionsPerBatch = std::max(4, std::min(128, 5000000 / C));
             for (int directionStart = 0; directionStart < M;) {
                 const int batchEnd = std::min(directionStart + directionsPerBatch, M);
@@ -720,13 +772,18 @@ CudaFigure5Result runFigure5Cuda(
                 }
                 directionStart = runEnd;
             }
+            siSweepSeconds += gpuTimer.stop("time CUDA SI angular sweeps");
+
+            gpuTimer.start();
             reduceDirectionsKernel<<<cellBlocks, reductionThreads>>>(
                 angularPsi.ptr, problem->weights.ptr, M, C, currentPhi
             );
             checkCuda(cudaGetLastError(), "launch CUDA SI angular reduction");
+            siReduceSeconds += gpuTimer.stop("time CUDA SI angular reduction");
 
             bool converged = false;
             double relative = 0.0;
+            gpuTimer.start();
             if (iteration > 1) {
                 checkCuda(cudaMemset(normValues.ptr, 0, 2 * sizeof(double)),
                           "clear CUDA SI norm values");
@@ -748,11 +805,13 @@ CudaFigure5Result runFigure5Cuda(
             } else {
                 checkCuda(cudaDeviceSynchronize(), "synchronize first CUDA SI iteration");
             }
+            siNormSeconds += gpuTimer.stop("time CUDA SI convergence norm");
             std::cerr << "CUDA SI iteration=" << iteration
                       << ", relative=" << relative << "\n";
             std::swap(previousPhi, currentPhi);
             result.convergedN = iteration;
             if (!checkpointPrefix.empty()) {
+                const auto checkpointStart = std::chrono::steady_clock::now();
                 checkpointPhi.resize(C);
                 checkCuda(
                     cudaMemcpy(checkpointPhi.data(), previousPhi,
@@ -763,22 +822,38 @@ CudaFigure5Result runFigure5Cuda(
                 saveSICheckpoint(
                     siCheckpointPath, C, M, iteration, converged, checkpointPhi
                 );
+                siCheckpointSeconds += secondsBetween(
+                    checkpointStart, std::chrono::steady_clock::now()
+                );
             }
             if (converged) break;
         }
 
         result.siFine.resize(C);
+        const auto siCopyStart = std::chrono::steady_clock::now();
         checkCuda(
             cudaMemcpy(result.siFine.data(), previousPhi,
                        static_cast<std::size_t>(C) * sizeof(double), cudaMemcpyDeviceToHost),
             "copy CUDA SI fine result"
         );
+        siCopySeconds += secondsBetween(siCopyStart, std::chrono::steady_clock::now());
+        siTotalSeconds = secondsBetween(siStart, std::chrono::steady_clock::now());
     }
 
     // RSI and RSI-tail share the same random chains and all iterations up to N+T.
+    const auto rsiStart = std::chrono::steady_clock::now();
     const int iterationCount = result.convergedN + tailExtra;
+    const auto scheduleStart = std::chrono::steady_clock::now();
     const std::vector<int> schedule =
         generateDirectionSchedule(seed, M, sampleCount, iterationCount);
+    const double rsiScheduleSeconds =
+        secondsBetween(scheduleStart, std::chrono::steady_clock::now());
+    double rsiDirectionCopySeconds = 0.0;
+    double rsiSweepSeconds = 0.0;
+    double rsiTailAccumSeconds = 0.0;
+    double rsiReduceSeconds = 0.0;
+    double rsiCopySeconds = 0.0;
+    double rsiCheckpointSeconds = 0.0;
     DeviceArray<double> globalRSISum, globalTailSum;
     globalRSISum.allocate(C);
     globalTailSum.allocate(C);
@@ -845,11 +920,15 @@ CudaFigure5Result runFigure5Cuda(
                              iteration];
             }
         }
+        const auto directionCopyStart = std::chrono::steady_clock::now();
         checkCuda(
             cudaMemcpy(selectedDirections.ptr, batchDirections.data(),
                        static_cast<std::size_t>(batchSize) * iterationCount * sizeof(int),
                        cudaMemcpyHostToDevice),
             "copy CUDA RSI direction schedule"
+        );
+        rsiDirectionCopySeconds += secondsBetween(
+            directionCopyStart, std::chrono::steady_clock::now()
         );
 
         double* previousPsi = psiA.ptr;
@@ -859,6 +938,7 @@ CudaFigure5Result runFigure5Cuda(
         for (int iteration = 1; iteration <= iterationCount; ++iteration) {
             checkCuda(cudaMemset(currentPsi, 0, batchCellCount * sizeof(double)),
                       "clear CUDA RSI current layer");
+            gpuTimer.start();
             for (int localPass = 0; localPass < 20; ++localPass) {
                 sweepSamplesKernel<<<sampleSweepBlocks, sweepThreads>>>(
                     problem->mesh.view(C),
@@ -878,29 +958,37 @@ CudaFigure5Result runFigure5Cuda(
                 );
                 checkCuda(cudaGetLastError(), "launch combined CUDA RSI sweep");
             }
+            rsiSweepSeconds += gpuTimer.stop("time CUDA RSI sample sweeps");
             if (iteration == result.convergedN) {
+                gpuTimer.start();
                 reduceSamplesKernel<<<cellBlocks, reductionThreads>>>(
                     currentPsi, batchSize, C, globalRSISum.ptr
                 );
                 checkCuda(cudaGetLastError(), "reduce CUDA RSI field");
+                rsiReduceSeconds += gpuTimer.stop("time CUDA RSI field reduction");
             }
             if (iteration >= result.convergedN) {
                 const int accumulationBlocks = static_cast<int>(
                     (batchCellCount + reductionThreads - 1) / reductionThreads
                 );
+                gpuTimer.start();
                 accumulateValuesKernel<<<accumulationBlocks, reductionThreads>>>(
                     currentPsi, batchCellCount, sampleTail.ptr
                 );
                 checkCuda(cudaGetLastError(), "accumulate CUDA RSI-tail batch field");
+                rsiTailAccumSeconds += gpuTimer.stop("time CUDA RSI-tail accumulation");
             }
             std::swap(previousPsi, currentPsi);
         }
+        gpuTimer.start();
         reduceSamplesKernel<<<cellBlocks, reductionThreads>>>(
             sampleTail.ptr, batchSize, C, globalTailSum.ptr
         );
         checkCuda(cudaGetLastError(), "reduce CUDA RSI-tail field");
+        rsiReduceSeconds += gpuTimer.stop("time CUDA RSI-tail reduction");
         checkCuda(cudaDeviceSynchronize(), "synchronize combined CUDA Figure 5 batch");
         if (!checkpointPrefix.empty()) {
+            const auto checkpointStart = std::chrono::steady_clock::now();
             checkpointRSISum.resize(C);
             checkpointTailSum.resize(C);
             checkCuda(cudaMemcpy(checkpointRSISum.data(), globalRSISum.ptr,
@@ -915,6 +1003,9 @@ CudaFigure5Result runFigure5Cuda(
                 rsiCheckpointPath, C, M, sampleCount, result.convergedN, tailExtra,
                 batchStart + batchSize, checkpointRSISum, checkpointTailSum
             );
+            rsiCheckpointSeconds += secondsBetween(
+                checkpointStart, std::chrono::steady_clock::now()
+            );
         }
         std::cerr << "CUDA RSI combined batch complete: samples="
                   << batchStart + batchSize << "/" << sampleCount << "\n";
@@ -922,12 +1013,14 @@ CudaFigure5Result runFigure5Cuda(
 
     result.rsi.resize(C);
     result.rsiTail.resize(C);
+    const auto rsiCopyStart = std::chrono::steady_clock::now();
     checkCuda(cudaMemcpy(result.rsi.data(), globalRSISum.ptr,
                          static_cast<std::size_t>(C) * sizeof(double), cudaMemcpyDeviceToHost),
               "copy combined CUDA RSI result");
     checkCuda(cudaMemcpy(result.rsiTail.data(), globalTailSum.ptr,
                          static_cast<std::size_t>(C) * sizeof(double), cudaMemcpyDeviceToHost),
               "copy combined CUDA RSI-tail result");
+    rsiCopySeconds += secondsBetween(rsiCopyStart, std::chrono::steady_clock::now());
     const double rsiDenominator = static_cast<double>(sampleCount);
     const double tailDenominator =
         static_cast<double>(sampleCount) * static_cast<double>(tailExtra + 1);
@@ -937,6 +1030,24 @@ CudaFigure5Result runFigure5Cuda(
     const double seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - totalStart
     ).count();
+    const double rsiTotalSeconds = secondsBetween(rsiStart, std::chrono::steady_clock::now());
+    std::cout << "CUDA timing: upload=" << uploadSeconds
+              << ", total=" << seconds << "\n";
+    std::cout << "CUDA timing: si_total=" << siTotalSeconds
+              << ", si_clear=" << siClearSeconds
+              << ", si_sweep=" << siSweepSeconds
+              << ", si_reduce=" << siReduceSeconds
+              << ", si_norm=" << siNormSeconds
+              << ", si_copy=" << siCopySeconds
+              << ", si_checkpoint=" << siCheckpointSeconds << "\n";
+    std::cout << "CUDA timing: rsi_total=" << rsiTotalSeconds
+              << ", rsi_schedule=" << rsiScheduleSeconds
+              << ", rsi_direction_copy=" << rsiDirectionCopySeconds
+              << ", rsi_sweep=" << rsiSweepSeconds
+              << ", rsi_tail_accum=" << rsiTailAccumSeconds
+              << ", rsi_reduce=" << rsiReduceSeconds
+              << ", rsi_copy=" << rsiCopySeconds
+              << ", rsi_checkpoint=" << rsiCheckpointSeconds << "\n";
     std::cout << "CUDA Figure 5 complete: cells=" << C << ", directions=" << M
               << ", SI_iterations=" << result.convergedN
               << ", samples=" << sampleCount << ", seconds=" << seconds << "\n";
