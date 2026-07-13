@@ -1,0 +1,12 @@
+build/
+results/
+organized_outputs/
+
+__pycache__/
+*.py[cod]
+
+rsi_unstructured
+rsi_unstructured_gpu
+gpu_consistency_test
+
+*.o

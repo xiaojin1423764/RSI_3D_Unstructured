@@ -37,7 +37,7 @@ static void printUsage(const char* prog) {
     std::cerr
         << "用法:\n"
         << "  " << prog << " [cells.csv faces.csv [figure2_data.csv] [rectangle|circle]]\n"
-        << "  " << prog << " --source-shape rectangle|circle [--out figure2_data.csv] [--figure5-dir examples/csv_data] [--only all|figure2|figure5] [cells.csv faces.csv]\n";
+        << "  " << prog << " --source-shape rectangle|circle [--gpu] [--out figure2_data.csv] [--figure5-dir examples/csv_data] [--only all|figure2|figure5] [cells.csv faces.csv]\n";
 }
 
 int main(int argc, char** argv) {
@@ -47,6 +47,7 @@ int main(int argc, char** argv) {
     std::string figure5Dir = "examples/csv_data";
     std::string sourceShape = "rectangle";
     std::string only = "all";
+    bool useGPU = false;
 
     std::vector<std::string> positional;
     for (int i = 1; i < argc; ++i) {
@@ -75,6 +76,8 @@ int main(int argc, char** argv) {
                 return 1;
             }
             only = argv[++i];
+        } else if (arg == "--gpu") {
+            useGPU = true;
         } else if (arg == "--help" || arg == "-h") {
             printUsage(argv[0]);
             return 0;
@@ -116,6 +119,9 @@ int main(int argc, char** argv) {
         writeSourceShapeFile(sourceShape, figure5Dir);
         const std::string figurePrefix = sourcePrefix(sourceShape);
         std::cout << "入射区域形状: " << sourceShape << " (" << figurePrefix << ")\n";
+        if (useGPU) {
+            std::cout << "GPU模式: RSI/RSI-tail使用CUDA样本并行；SI使用CUDA角度并行；Figure 2保持CPU路径\n";
+        }
 
         if (only == "all" || only == "figure2") {
             std::vector<Figure2Row> allRows;
@@ -178,22 +184,30 @@ int main(int argc, char** argv) {
             fineCfg.scattering = "isotropic";
             fineCfg.sourceShape = sourceShape;
             fineCfg.seed = 20260513u;
+            fineCfg.useGPU = useGPU;
 
             RSISolver fineSolver(mesh, fineCfg);
-            int Nfine = 0;
-            auto phiSIfine = fineSolver.runSIField(Nfine);
-            RSISolver::writeFieldCSV(siFineFile, mesh, phiSIfine);
-
-            // RSI，使用512个样本
             int S = 512;
-            auto phiRSI = fineSolver.runRSIFieldAtN(Nfine, S, 0);
-            RSISolver::writeFieldCSV(rsiFile, mesh, phiRSI);
-
-            // RSI + 尾部平均。
-            // tailExtra=10 表示平均 Nfine 到 Nfine+10 的数据。
             int tailExtra = 10;
-            auto phiRSITail = fineSolver.runRSIFieldAtN(Nfine, S, tailExtra);
-            RSISolver::writeFieldCSV(rsiTailFile, mesh, phiRSITail);
+            if (useGPU) {
+                const Figure5Fields fields = fineSolver.runFigure5GPU(S, tailExtra);
+                RSISolver::writeFieldCSV(siFineFile, mesh, fields.siFine);
+                RSISolver::writeFieldCSV(rsiFile, mesh, fields.rsi);
+                RSISolver::writeFieldCSV(rsiTailFile, mesh, fields.rsiTail);
+                std::cout << "GPU Figure 5 SI converged at N=" << fields.convergedN << "\n";
+            } else {
+                int Nfine = 0;
+                auto phiSIfine = fineSolver.runSIField(Nfine);
+                RSISolver::writeFieldCSV(siFineFile, mesh, phiSIfine);
+
+                // RSI，使用512个样本
+                auto phiRSI = fineSolver.runRSIFieldAtN(Nfine, S, 0);
+                RSISolver::writeFieldCSV(rsiFile, mesh, phiRSI);
+
+                // RSI + 尾部平均：平均 Nfine 到 Nfine+tailExtra。
+                auto phiRSITail = fineSolver.runRSIFieldAtN(Nfine, S, tailExtra);
+                RSISolver::writeFieldCSV(rsiTailFile, mesh, phiRSITail);
+            }
 
             std::cout << "Figure 5 数据已输出:\n";
             std::cout << "  " << siCoarseFile << "\n";

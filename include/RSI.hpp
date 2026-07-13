@@ -21,6 +21,7 @@ struct RSIConfig {
     std::string scattering = "isotropic"; // isotropic / anisotropic
     std::string sourceShape = "rectangle"; // rectangle / circle
     int groupCount = 1;  // RSI 每步选择的方向数 G
+    bool useGPU = false; // CUDA sample-parallel backend for isotropic G=1 field runs
 };
 
 struct Figure2Row {
@@ -31,6 +32,13 @@ struct Figure2Row {
     double eRSI;
 };
 
+struct Figure5Fields {
+    std::vector<double> siFine;
+    std::vector<double> rsi;
+    std::vector<double> rsiTail;
+    int convergedN = 0;
+};
+
 class RSISolver {
 public:
     RSISolver(const Mesh& mesh, RSIConfig cfg);
@@ -38,6 +46,7 @@ public:
     std::vector<Figure2Row> runFigure2Experiment();
     std::vector<double> runSIField(int& convergedN) const;
     std::vector<double> runRSIFieldAtN(int N, int sampleCount, int tailExtra) const;
+    Figure5Fields runFigure5GPU(int sampleCount, int tailExtra) const;
     static void writeFieldCSV(const std::string& file,
                               const Mesh& mesh,
                               const std::vector<double>& phi0);
@@ -46,6 +55,9 @@ private:
     RSIConfig cfg_;
     std::vector<Ordinate> ordinates_;
     TransportSweep sweep_;
+    mutable std::vector<SweepPlan> sweepPlansCache_;
+
+    const std::vector<SweepPlan>& cachedSweepPlans() const;
 
     double kernel(int k, int m) const;
     std::vector<std::vector<double>> precomputeKernel() const;

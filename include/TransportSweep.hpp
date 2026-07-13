@@ -33,6 +33,4 @@ public:
 private:
     const Mesh& mesh_;
     std::string sourceShape_;
-
-    std::vector<int> buildSweepOrder(const Vec3& omega) const;
 };

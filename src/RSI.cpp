@@ -1,15 +1,64 @@
 #include "RSI.hpp"
+#ifdef RSI_ENABLE_CUDA
+#include "CudaRSI.hpp"
+#endif
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
+#include <exception>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 
 
 RSISolver::RSISolver(const Mesh& mesh, RSIConfig cfg)
     : mesh_(mesh), cfg_(std::move(cfg)), ordinates_(Quadrature::levelSymmetricSN(cfg_.angularN)),
-     sweep_(mesh, cfg_.sourceShape) {}
+      sweep_(mesh, cfg_.sourceShape) {}
+
+const std::vector<SweepPlan>& RSISolver::cachedSweepPlans() const {
+    if (sweepPlansCache_.empty()) {
+        const auto start = std::chrono::steady_clock::now();
+        sweepPlansCache_.resize(ordinates_.size());
+        std::atomic<std::size_t> next{0};
+        std::exception_ptr workerError;
+        std::mutex errorMutex;
+        const unsigned workerCount = std::max(
+            1u,
+            std::min<unsigned>(
+                static_cast<unsigned>(ordinates_.size()),
+                std::thread::hardware_concurrency()
+            )
+        );
+        std::vector<std::thread> workers;
+        workers.reserve(workerCount);
+        for (unsigned worker = 0; worker < workerCount; ++worker) {
+            workers.emplace_back([&] {
+                try {
+                    while (true) {
+                        const std::size_t index = next.fetch_add(1);
+                        if (index >= ordinates_.size()) break;
+                        sweepPlansCache_[index] = sweep_.buildSweepPlan(ordinates_[index].omega);
+                    }
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(errorMutex);
+                    if (!workerError) workerError = std::current_exception();
+                }
+            });
+        }
+        for (std::thread& worker : workers) worker.join();
+        if (workerError) std::rethrow_exception(workerError);
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start
+        ).count();
+        std::cout << "Sweep plans built: directions=" << ordinates_.size()
+                  << ", threads=" << workerCount << ", seconds=" << seconds << "\n";
+    }
+    return sweepPlansCache_;
+}
      // sweep_ 是非结构网格输运扫掠器，它负责在给定方向 omega 
      //和散射源 source 的情况下，求解空间离散后的输运方程，得到 psi
 
@@ -96,11 +145,7 @@ std::vector<std::vector<double>> RSISolver::runSI(int& convergedN) const {
 
     // 预计算散射核矩阵 K[k][m]
     auto K = precomputeKernel();
-    std::vector<SweepPlan> sweepPlans;
-    sweepPlans.reserve(M);
-    for (const auto& ord : ordinates_) {
-        sweepPlans.push_back(sweep_.buildSweepPlan(ord.omega));
-    }
+    const auto& sweepPlans = cachedSweepPlans();
 
 
     // phi[m][i] 表示：
@@ -206,11 +251,7 @@ double RSISolver::runRSIErrorAtN(const std::vector<std::vector<double>>& siPhi0H
     const int G = cfg_.groupCount;
 
     auto K = precomputeKernel();
-    std::vector<SweepPlan> sweepPlans;
-    sweepPlans.reserve(M);
-    for (const auto& ord : ordinates_) {
-        sweepPlans.push_back(sweep_.buildSweepPlan(ord.omega));
-    }
+    const auto& sweepPlans = cachedSweepPlans();
     auto groups = makeGroups(M, G);
     
     //创建随机数
@@ -377,6 +418,27 @@ std::vector<double> RSISolver::runSIField(int& convergedN) const {
     return hist.back();
 }
 
+Figure5Fields RSISolver::runFigure5GPU(int sampleCount, int tailExtra) const {
+#ifdef RSI_ENABLE_CUDA
+    if (cfg_.scattering != "isotropic" || cfg_.groupCount != 1) {
+        throw std::runtime_error(
+            "CUDA Figure 5 currently supports only isotropic scattering with G=1"
+        );
+    }
+    const CudaFigure5Result cuda = runFigure5Cuda(
+        mesh_, ordinates_, cachedSweepPlans(), cfg_.sourceShape, cfg_.seed,
+        cfg_.maxSIters, cfg_.siTolerance, sampleCount, tailExtra
+    );
+    return {cuda.siFine, cuda.rsi, cuda.rsiTail, cuda.convergedN};
+#else
+    (void)sampleCount;
+    (void)tailExtra;
+    throw std::runtime_error(
+        "this executable was built without CUDA; use `make gpu` and run rsi_unstructured_gpu"
+    );
+#endif
+}
+
 
 // 运行 RSI，并返回用于 Figure 5 绘图的空间零阶矩场 phi0。
 // 这个函数和 runRSIErrorAtN() 的区别是：
@@ -395,12 +457,26 @@ std::vector<double> RSISolver::runRSIFieldAtN(
     //     因此每步一共选 G 个方向
     const int G = cfg_.groupCount;
 
-    auto K = precomputeKernel();
-    std::vector<SweepPlan> sweepPlans;
-    sweepPlans.reserve(M);
-    for (const auto& ord : ordinates_) {
-        sweepPlans.push_back(sweep_.buildSweepPlan(ord.omega));
+    if (cfg_.useGPU) {
+#ifdef RSI_ENABLE_CUDA
+        if (cfg_.scattering != "isotropic" || G != 1) {
+            throw std::runtime_error(
+                "CUDA sample-parallel RSI currently supports only isotropic scattering with G=1"
+            );
+        }
+        return runRSIFieldAtNCuda(
+            mesh_, ordinates_, cachedSweepPlans(), cfg_.sourceShape, cfg_.seed,
+            N, sampleCount, tailExtra
+        );
+#else
+        throw std::runtime_error(
+            "this executable was built without CUDA; use `make gpu` and run rsi_unstructured_gpu"
+        );
+#endif
     }
+
+    auto K = precomputeKernel();
+    const auto& sweepPlans = cachedSweepPlans();
 
 
     // 将 M 个方向划分成 G 个 group。
@@ -412,9 +488,6 @@ std::vector<double> RSISolver::runRSIFieldAtN(
     for (const auto& group : groups) {
         groupUniformProb.push_back(1.0 / static_cast<double>(group.size()));
     }
-
-    std::mt19937 rng(cfg_.seed + 17u * static_cast<unsigned>(M));
-
 
     // avgPhi0 用于累加 RSI 的零阶矩估计。
     // avgPhi0[i] 表示第 i 个 cell 上累加的 phi0。
@@ -433,6 +506,12 @@ std::vector<double> RSISolver::runRSIFieldAtN(
     const int lastIter = N + tailExtra;
 
     for (int s = 0; s < sampleCount; ++s) {
+        // Per-sample streams make the first N steps identical between RSI and
+        // RSI-tail, independent of how many tail steps other samples consume.
+        std::mt19937 rng(
+            cfg_.seed + 17u * static_cast<unsigned>(M) +
+            0x9e3779b9u * static_cast<unsigned>(s + 1)
+        );
         std::vector<int> prevSet;
         std::vector<double> prevProb(M, 0.0);
         std::vector<std::vector<double>> prevPsi;

@@ -28,142 +28,6 @@ static Vec3 outwardNormalForCell(const Face& f, int sign) {
 }
 
 
-// 判断当前方向 omega 的 cell 依赖图是否存在环。
-//
-// 如果存在环，严格拓扑扫掠无法覆盖所有 cell，
-// 后面会使用“投影排序 + Gauss-Seidel 迭代”作为 fallback。
-static bool hasSweepCycle(const Mesh& mesh, const Vec3& omega) {
-    const int C = static_cast<int>(mesh.cells.size());
-
-    std::vector<std::vector<int>> graph(C);
-    std::vector<int> indeg(C, 0);
-
-    const double eps = 1e-14;
-
-    // 遍历所有内部 face，建立上游 cell -> 下游 cell 的有向边。
-    for (const auto& f : mesh.faces) {
-        // right_cell < 0 表示边界面，没有 cell-cell 依赖。
-        if (f.right_cell < 0) continue;
-
-        // L/R 是 cell 在 mesh.cells 数组中的下标。
-        int L = mesh.cellIndex(f.left_cell);
-        int R = mesh.cellIndex(f.right_cell);
-
-        // f.normal 约定从 left_cell 指向 right_cell。
-        double mu = dot(omega, f.normal);
-
-        // 如果方向几乎平行于该面，则忽略这个面产生的依赖。
-        if (std::fabs(mu) <= eps) continue;
-
-        // mu > 0 表示粒子从 L 穿过该面流向 R。
-        // mu < 0 表示粒子从 R 穿过该面流向 L。
-        int up   = (mu > 0.0) ? L : R;
-        int down = (mu > 0.0) ? R : L;
-
-        graph[up].push_back(down);
-        indeg[down]++;
-    }
-
-    // Kahn 拓扑排序，只用于判断是否存在环。
-    std::queue<int> q;
-
-    for (int i = 0; i < C; ++i) {
-        if (indeg[i] == 0) q.push(i);
-    }
-
-    int visited = 0;
-
-    while (!q.empty()) {
-        int u = q.front();
-        q.pop();
-        visited++;
-
-        for (int v : graph[u]) {
-            --indeg[v];
-            if (indeg[v] == 0) q.push(v);
-        }
-    }
-
-    // 如果没有访问完所有 cell，说明图中存在环。
-    return visited != C;
-}
-
-
-// 根据方向 omega 构造 cell 扫掠顺序。
-//
-// 无环时：返回严格拓扑 sweep 顺序。
-// 有环时：返回按 dot(center, omega) 从小到大排序的 fallback 顺序。
-std::vector<int> TransportSweep::buildSweepOrder(const Vec3& omega) const {
-    const int C = static_cast<int>(mesh_.cells.size());
-
-    std::vector<std::vector<int>> graph(C);
-    std::vector<int> indeg(C, 0);
-
-    const double eps = 1e-14;
-
-    // 对每个内部面建立 upwind -> downwind 依赖边。
-    for (const auto& f : mesh_.faces) {
-        if (f.right_cell < 0) continue;
-
-        int L = mesh_.cellIndex(f.left_cell);
-        int R = mesh_.cellIndex(f.right_cell);
-
-        double mu = dot(omega, f.normal);
-
-        if (std::fabs(mu) <= eps) continue;
-
-        int up   = (mu > 0.0) ? L : R;
-        int down = (mu > 0.0) ? R : L;
-
-        graph[up].push_back(down);
-        indeg[down]++;
-    }
-
-    std::queue<int> q;
-
-    for (int i = 0; i < C; ++i) {
-        if (indeg[i] == 0) q.push(i);
-    }
-
-    std::vector<int> order;
-    order.reserve(C);
-
-    while (!q.empty()) {
-        int u = q.front();
-        q.pop();
-
-        order.push_back(u);
-
-        for (int v : graph[u]) {
-            --indeg[v];
-            if (indeg[v] == 0) q.push(v);
-        }
-    }
-
-    // 如果拓扑排序失败，说明方向依赖图有环。
-    // 对一般非结构网格这可能出现。
-    // 此时按 cell center 在 omega 方向上的投影排序。
-    if (static_cast<int>(order.size()) != C) {
-        order.resize(C);
-
-        for (int i = 0; i < C; ++i) {
-            order[i] = i;
-        }
-
-        std::sort(order.begin(), order.end(), [&](int a, int b) {
-            return dot(mesh_.cells[a].center, omega)
-                 < dot(mesh_.cells[b].center, omega);
-        });
-
-        std::cerr
-            << "警告: 当前方向 cell 依赖图存在环，"
-            << "已改用投影排序 + 上风 Gauss-Seidel 迭代。\n";
-    }
-
-    return order;
-}
-
-
 // 计算边界入流值。
 //
 // 目前支持四类：
@@ -358,9 +222,54 @@ std::vector<double> TransportSweep::solveDirection(
 
 
 SweepPlan TransportSweep::buildSweepPlan(const Vec3& omega) const {
+    const int C = static_cast<int>(mesh_.cells.size());
+    constexpr double eps = 1e-14;
     SweepPlan plan;
-    plan.order = buildSweepOrder(omega);
-    plan.hasCycle = hasSweepCycle(mesh_, omega);
+    plan.order.reserve(C);
+
+    // Count each cell's upwind dependencies directly from its four face refs.
+    // This avoids allocating a vector-of-vectors graph for every ordinate.
+    std::vector<int> indegree(C, 0);
+    for (int cell = 0; cell < C; ++cell) {
+        for (const CellFaceRef& ref : mesh_.cells[cell].faceRefs) {
+            if (ref.neighbor < 0) continue;
+            const Face& face = mesh_.faces[ref.face];
+            const Vec3 outward = outwardNormalForCell(face, ref.sign);
+            if (dot(omega, outward) < -eps) ++indegree[cell];
+        }
+    }
+
+    std::vector<int> queue;
+    queue.reserve(C);
+    for (int cell = 0; cell < C; ++cell) {
+        if (indegree[cell] == 0) queue.push_back(cell);
+    }
+
+    std::size_t head = 0;
+    while (head < queue.size()) {
+        const int cell = queue[head++];
+        plan.order.push_back(cell);
+        for (const CellFaceRef& ref : mesh_.cells[cell].faceRefs) {
+            if (ref.neighbor < 0) continue;
+            const Face& face = mesh_.faces[ref.face];
+            const Vec3 outward = outwardNormalForCell(face, ref.sign);
+            if (dot(omega, outward) > eps && --indegree[ref.neighbor] == 0) {
+                queue.push_back(ref.neighbor);
+            }
+        }
+    }
+
+    plan.hasCycle = static_cast<int>(plan.order.size()) != C;
+    if (plan.hasCycle) {
+        plan.order.resize(C);
+        for (int cell = 0; cell < C; ++cell) plan.order[cell] = cell;
+        std::sort(plan.order.begin(), plan.order.end(), [&](int a, int b) {
+            return dot(mesh_.cells[a].center, omega) < dot(mesh_.cells[b].center, omega);
+        });
+        std::cerr
+            << "警告: 当前方向 cell 依赖图存在环，"
+            << "已改用投影排序 + 上风 Gauss-Seidel 迭代。\n";
+    }
     return plan;
 }
 
