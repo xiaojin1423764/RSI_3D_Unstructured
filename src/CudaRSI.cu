@@ -413,6 +413,7 @@ std::vector<int> generateDirectionSchedule(
 struct DeviceProblem {
     int cellCount = 0;
     int directionCount = 0;
+    std::vector<unsigned char> hostHasCycle;
     DeviceMeshStorage mesh;
     DeviceArray<double> ordinateX;
     DeviceArray<double> ordinateY;
@@ -422,6 +423,17 @@ struct DeviceProblem {
     DeviceArray<int> orders;
     DeviceArray<int> allDirections;
 };
+
+int sameCycleRunEnd(
+    const std::vector<unsigned char>& hasCycle,
+    int begin,
+    int end
+) {
+    const unsigned char value = hasCycle[begin];
+    int current = begin + 1;
+    while (current < end && hasCycle[current] == value) ++current;
+    return current;
+}
 
 std::unique_ptr<DeviceProblem> uploadProblem(
     const Mesh& mesh,
@@ -456,6 +468,7 @@ std::unique_ptr<DeviceProblem> uploadProblem(
     problem->ordinateY.copyFrom(oy);
     problem->ordinateZ.copyFrom(oz);
     problem->weights.copyFrom(weights);
+    problem->hostHasCycle = hasCycle;
     problem->hasCycle.copyFrom(hasCycle);
     problem->allDirections.copyFrom(directions);
     problem->orders.allocate(static_cast<std::size_t>(M) * C);
@@ -675,16 +688,19 @@ CudaFigure5Result runFigure5Cuda(
              iteration <= maxSIters && !siAlreadyConverged; ++iteration) {
             checkCuda(cudaMemset(angularPsi.ptr, 0, angularValueCount * sizeof(double)),
                       "clear CUDA SI angular field");
-            for (int localPass = 0; localPass < 20; ++localPass) {
-                const int directionsPerBatch =
-                    std::max(4, std::min(64, 2500000 / C));
-                for (int directionStart = 0; directionStart < M;
-                     directionStart += directionsPerBatch) {
-                    const int directionBatch =
-                        std::min(directionsPerBatch, M - directionStart);
-                    const int directionSweepBlocks =
-                        (directionBatch + samplesPerSweepBlock - 1) /
-                        samplesPerSweepBlock;
+            const int directionsPerBatch = std::max(4, std::min(128, 5000000 / C));
+            for (int directionStart = 0; directionStart < M;) {
+                const int batchEnd = std::min(directionStart + directionsPerBatch, M);
+                const int runEnd = sameCycleRunEnd(
+                    problem->hostHasCycle, directionStart, batchEnd
+                );
+                const int directionBatch = runEnd - directionStart;
+                const int directionSweepBlocks =
+                    (directionBatch + samplesPerSweepBlock - 1) /
+                    samplesPerSweepBlock;
+                const int localPassCount =
+                    problem->hostHasCycle[directionStart] != 0 ? 20 : 1;
+                for (int localPass = 0; localPass < localPassCount; ++localPass) {
                     sweepSamplesKernel<<<directionSweepBlocks, sweepThreads>>>(
                         problem->mesh.view(C),
                         problem->ordinateX.ptr,
@@ -702,6 +718,7 @@ CudaFigure5Result runFigure5Cuda(
                     );
                     checkCuda(cudaGetLastError(), "launch CUDA SI angular sweep batch");
                 }
+                directionStart = runEnd;
             }
             reduceDirectionsKernel<<<cellBlocks, reductionThreads>>>(
                 angularPsi.ptr, problem->weights.ptr, M, C, currentPhi

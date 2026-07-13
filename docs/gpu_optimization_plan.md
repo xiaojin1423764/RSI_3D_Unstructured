@@ -10,6 +10,7 @@
 |---|---:|---|
 | CPU | 266.32 s | `gmsh_work/data`，36,470 cells |
 | GPU direct-global-tail 版本 | 145.23 s | 数值逐 CSV 一致，但比旧 GPU 基线慢 |
+| GPU SI cycle-run + 5M direction batch | 75.27 s | `NVCCARCH=sm_120`，快于旧 GPU 基线 89.83 s |
 
 CPU/GPU 四个 CSV (`SI_coarse`、`SI_fine`、`RSI`、`RSI_tail`) 对比为逐值一致，plain relative L2 和 max abs 均为 0。
 
@@ -96,7 +97,29 @@ if (localPass > 0 && !hasCycle) return;
   localPassCount = 20
 ```
 
-进一步优化可把 cyclic 和 acyclic directions 分开 batch，但第一步先做 batch 级判断即可。
+已验证的简单 batch 级判断会回归：如果一个 batch 中混入少量 cyclic direction，
+整个 batch 仍会跑 20 pass，无法真正减少 launch/空转，还会增加 host 侧判断开销。
+因此下一版必须按 `hasCycle` 连续区间拆分 SI 方向：
+
+```text
+for each contiguous direction run with same hasCycle:
+  if acyclic:
+    launch localPass=0 only
+  else:
+    launch localPass=0..19
+```
+
+这样保持 `angularPsi[direction*C + cell]` 的原有布局，不需要 scatter，也不会改变
+浮点归约顺序。
+
+已实现结果：
+
+- SI direction batch 从 `min(64, 2500000/C)` 调整为 `min(128, 5000000/C)`。
+- 每个 direction batch 内再按 `hasCycle` 连续区间拆分；无环区间只 launch
+  `localPass=0`，有环区间保持 20 pass。
+- 30k 完整 Figure 5 GPU wall time 为 `75.27 s`，低于旧基线 `89.83 s`。
+- 默认 `gpu_consistency_test` 通过，Figure5 小规模 CPU/GPU relative L2 约
+  `1e-16` 量级。
 
 验收指标：
 
@@ -154,6 +177,11 @@ reduceDirectionsAndNormKernel
 在写 `currentPhi[cell]` 时同步计算该 cell 的 norm 局部贡献。收益是减少一次 `C` 规模全局读写和一次 kernel launch。
 
 ## 优先级 6：CUDA Graph 或持久 kernel
+
+在做 CUDA Graph 前，先完成“cyclic/acyclic 连续区间拆分”的 localPass 优化。
+上一轮 batch 级跳过无环 pass 的 30k 完整 Figure 5 为 `231.71 s`，未达旧基线，
+已回退；`NVCCARCH=sm_120` 当前提交版本为 `185.75 s`，同样未达旧基线。
+下一轮只改 SI direction loop，不改 RSI loop，避免把 RSI batch 行为一起扰动。
 
 SI fine 的 kernel 启动结构在 14 轮迭代中基本固定。若分阶段计时显示 launch overhead 明显，可考虑：
 
