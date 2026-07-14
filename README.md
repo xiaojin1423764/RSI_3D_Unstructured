@@ -52,6 +52,153 @@ make tecplot  # 导出 Tecplot ASCII DAT 非结构四面体场数据
 make plot-all  # 生成 Figure 2、Figure 5、网格和角度划分图片
 ```
 
+## CUDA 样本并行
+
+CUDA 版本加速 Figure 5 的各向同性 `G=1` RSI、RSI-tail 和 SI。RSI 的独立
+样本链并行执行；每个 warp 划分为 8 个 4-lane 子组，同时推进 8 条样本链。
+SI 在角度方向上并行，角通量归约和收敛范数也在 GPU 上完成。Figure 2 仍使用
+CPU 路径。
+
+```bash
+make gpu
+./rsi_unstructured_gpu --gpu --source-shape circle --only figure5 \
+  --figure5-dir examples/csv_data_gpu \
+  gmsh_work/data/cells.csv gmsh_work/data/faces.csv
+```
+
+`NVCCARCH` 默认使用本机 GPU 架构，也可以显式指定，例如：
+
+```bash
+make gpu NVCCARCH=sm_120
+```
+
+运行 CPU/GPU 小规模一致性测试：
+
+```bash
+make test-gpu
+```
+
+长任务可设置检查点前缀。SI 每轮迭代保存一次，RSI 每个 sample batch 保存一次；
+同一命令再次运行会校验网格、角度、sample 数、迭代步数和 tail 长度后继续计算：
+
+```bash
+RSI_CUDA_CHECKPOINT=results/figure5_gpu_30k_194k/200k/checkpoint \
+./rsi_unstructured_gpu --gpu --source-shape circle --only figure5 \
+  --figure5-dir results/figure5_gpu_30k_194k/200k \
+  gmsh_work/mesh200k/cells.csv gmsh_work/mesh200k/faces.csv
+```
+
+### GPU 基准使用的空间网格
+
+当前空间网格输入如下；目录中的 30k/200k 是近似标记，实际数量以 CSV 为准：
+
+| 图集标记 | 网格输入 | 实际四面体单元数 | 平均单元体积 |
+|---|---|---:|---:|
+| 30k | `gmsh_work/data/cells.csv`、`faces.csv` | 36,470 | `2.74198e-5` |
+| 200k | `gmsh_work/mesh200k/cells.csv`、`faces.csv` | 194,314 | `5.14631e-6` |
+
+这里的粗/细网格指空间四面体网格，不是 Figure 5 中的角度离散：
+`SI coarse` 使用 $S_4$（24 个角度），`SI fine` 使用 $S_{32}$（1088 个角度）。
+因此 36,470/194,314 是空间 cell 数，24/1088 是角方向数量，两者是独立参数。
+
+当前重新计算的数据位于 `results/figure5_gpu_30k_194k/{30k,200k}/Cir/`。
+不能把旧的 164,151-cell 场数据与新的 194,314-cell 网格连接关系混用。
+
+### 已实现的四项 GPU 优化
+
+1. RSI 和 RSI-tail 合并为一次随机链计算。RSI 是第 $N$ 步结果，RSI-tail 是
+   第 $N$ 至 $N+10$ 步平均，不再重复计算前 $N$ 步。
+2. 网格、角方向和 sweep plan 在一次 Figure 5 调用中上传一次并常驻 GPU，供
+   SI、RSI 和 RSI-tail 复用。
+3. SI fine 使用 GPU 角度并行 sweep，并在 GPU 上完成角度归约和收敛范数。
+   方向按网格规模动态分批，避免 194,314-cell 网格上的单次 kernel 过大。
+4. 一个 warp 划分为 8 个 4-lane 子组；四个 lane 对应四面体的四个面，使每个
+   warp 同时计算 8 条 sample 链，减少空闲 lane。
+
+为保证合并前后的统计定义明确，CPU/GPU 场计算均使用逐 sample 的确定性 RNG：
+`seed + 17*M + 0x9e3779b9*(sample+1)`。因此 RSI 严格对应 RSI-tail 同一批随机链
+的前 $N$ 步，而不依赖线程调度或 batch 划分。
+
+36,470-cell、$S_4$ 的完整 Figure 5 CPU/GPU 回归结果为：SI 相对 L2 误差
+`1.58222e-16`，RSI 为 `1.77454e-16`，RSI-tail 为 `2.24576e-16`；CPU/GPU
+均在第 14 轮收敛。
+
+### 当前进展（2026-07-13）
+
+- 四项 GPU 优化已经实现并通过编译与一致性测试。
+- 30k（36,470 cells）和 200k（194,314 cells）的 Figure 5 已重新计算完成。
+- 每套结果均包含 `SI_coarse`、`SI_fine`、`RSI`、`RSI_tail`，共 8 个 CSV；
+  行数分别为 36,470 和 194,314，`phi0` 全部为有限值。
+- 两种网格的 SI fine 均在第 14 轮收敛。Figure 5 使用 24/1088 个角度、
+  512 samples 和 `tailExtra=10`。
+- CPU/GPU 同参数计时产生的四个 CSV 在 30k 和 200k 上均逐字节一致。
+- Figure 5 场图已按要求从 `30k&200k/` 删除，当前只保留两张实际入射区域图。
+  `30k_200k_results.pdf` 是删除场图前编译的快照；在 Tecplot 新图完成前不再更新。
+
+### CPU/GPU 完整运行时间
+
+测试包含 sweep plan 构建、SI coarse、SI fine、RSI、RSI-tail 和四个 CSV 写出；
+不使用检查点。硬件为 AMD Ryzen 7 9700X（8C/16T）和 RTX 5070 Ti 16 GB。
+
+| 空间网格 | CPU | GPU | 加速比 | 时间降低 |
+|---|---:|---:|---:|---:|
+| 30k（36,470 cells） | 245.36 s | 89.83 s | 2.73x | 63.39% |
+| 200k（194,314 cells） | 1751.69 s | 1417.84 s | 1.24x | 19.06% |
+
+200k 的加速比下降主要来自两类分批开销：SI 的 1088 个方向在该网格上约按
+12 directions/batch 执行；RSI 受显存限制约为 25 samples/batch，512 samples
+需要约 21 批。当前下一阶段性能重点是减少 SI kernel 的批间同步，以及 RSI
+sample batch 的数据管理和同步开销。
+
+### 下一阶段 GPU 优化计划
+
+优化顺序以 200k 完整 Figure 5 墙钟时间为准，同时保留 30k 回归。每项修改后
+必须运行 CPU/GPU 一致性测试，并比较四个 CSV；容差继续使用相对 L2 `5e-10`
+和最大绝对误差 `5e-9`，正式 30k/200k 输出应保持当前逐字节一致性。
+
+1. 分阶段计时与 Nsight 定位。分别记录 sweep plan、SI 每轮、RSI 每个 batch、
+   Host/Device 传输和 CSV 写出时间，并使用 Nsight Systems 确认 200k 中约
+   701.59 s system time 的来源。先定位同步或内存问题，再调整 kernel。
+2. SI 方向流式化。当前一次分配完整的 `M*C` angular field，并按约 12 个方向
+   启动 kernel。改为只保留一个方向 chunk，在同一 CUDA stream 中 sweep 后立即
+   累加到 `phi`，避免保存全部 1088 个方向的角通量，并增大可用方向 batch。
+3. SI 批次内归约融合。把角通量加权归约、source 更新和局部范数部分融合进批次
+   尾部，使用 block reduction 或 CUB，减少每轮 SI 的全局内存往返与同步点。
+4. CUDA Graph 或持久 kernel。SI 的 14 轮迭代具有相同启动结构；在 sweep plan
+   固定后捕获 CUDA Graph，或者使用持久 kernel 消除大量小方向 batch 的启动开销。
+5. RSI 工作区复用。把 sample batch 的临时数组按最大 batch 一次分配，在 21 个
+   batch 间复用；避免循环内 `cudaMalloc/cudaFree`、重复清零和不必要的 Host 同步。
+6. RSI 分块累计。每个 batch 在 GPU 上直接累加 RSI 与 tail 的 cell sum，只在
+   512 samples 完成后拷回两个最终场。检查是否仍有 batch 级结果回传并将其删除。
+7. 显存布局压缩。评估 sweep plan 索引使用 32-bit、只读几何数据使用 SoA，及
+   不再常驻的中间量；目标是把 200k 的 samples/batch 从约 25 提高到至少 64。
+8. 传输与计算重叠。若 batch 间仍需要 Host 交互，使用 pinned memory 和双缓冲
+   CUDA streams，使下一批准备与当前批计算重叠；没有真实传输时不引入此复杂度。
+
+阶段验收目标：首先把 200k 从 1417.84 s 降到 900 s 以下（相对当前 GPU 至少
+1.58x），随后以 600 s 为目标；30k 不得慢于当前 89.83 s。每次基准都必须无
+检查点运行，参数固定为 24/1088 angles、512 samples、`tailExtra=10`。
+
+### 当前 Tecplot 数据
+
+已使用各自正确的 Gmsh 四面体连接关系导出 Tecplot ASCII DAT：
+
+```text
+30k&200k/tecplot/30k/Cir/figure5_SI_coarse.dat
+30k&200k/tecplot/30k/Cir/figure5_SI_fine.dat
+30k&200k/tecplot/30k/Cir/figure5_RSI.dat
+30k&200k/tecplot/30k/Cir/figure5_RSI_tail.dat
+30k&200k/tecplot/200k/Cir/figure5_SI_coarse.dat
+30k&200k/tecplot/200k/Cir/figure5_SI_fine.dat
+30k&200k/tecplot/200k/Cir/figure5_RSI.dat
+30k&200k/tecplot/200k/Cir/figure5_RSI_tail.dat
+```
+
+DAT zone 类型为 `FETETRAHEDRON`、`DATAPACKING=BLOCK`，`phi0` 和 `cell_id`
+均为 cell-centered。30k zone 为 6,870 nodes / 36,470 elements；200k zone 为
+35,401 nodes / 194,314 elements。下一步由 Tecplot 生成 Iso = 1、0.5、0.05
+等值面以及 $y=0$、$y=0.5$ 截面图。
+
 
 
 运行结束之后数据保存到:

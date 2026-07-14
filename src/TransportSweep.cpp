@@ -247,21 +247,30 @@ SweepPlan TransportSweep::buildSweepPlan(const Vec3& omega) const {
 
     std::size_t head = 0;
     while (head < queue.size()) {
-        const int cell = queue[head++];
-        plan.order.push_back(cell);
-        for (const CellFaceRef& ref : mesh_.cells[cell].faceRefs) {
-            if (ref.neighbor < 0) continue;
-            const Face& face = mesh_.faces[ref.face];
-            const Vec3 outward = outwardNormalForCell(face, ref.sign);
-            if (dot(omega, outward) > eps && --indegree[ref.neighbor] == 0) {
-                queue.push_back(ref.neighbor);
+        plan.levelOffsets.push_back(static_cast<int>(plan.levelCells.size()));
+        const std::size_t levelEnd = queue.size();
+        std::sort(queue.begin() + head, queue.begin() + levelEnd);
+        while (head < levelEnd) {
+            const int cell = queue[head++];
+            plan.order.push_back(cell);
+            plan.levelCells.push_back(cell);
+            for (const CellFaceRef& ref : mesh_.cells[cell].faceRefs) {
+                if (ref.neighbor < 0) continue;
+                const Face& face = mesh_.faces[ref.face];
+                const Vec3 outward = outwardNormalForCell(face, ref.sign);
+                if (dot(omega, outward) > eps && --indegree[ref.neighbor] == 0) {
+                    queue.push_back(ref.neighbor);
+                }
             }
         }
     }
 
     plan.hasCycle = static_cast<int>(plan.order.size()) != C;
+    plan.levelOffsets.push_back(static_cast<int>(plan.levelCells.size()));
     if (plan.hasCycle) {
         plan.order.resize(C);
+        plan.levelCells.clear();
+        plan.levelOffsets.clear();
         for (int cell = 0; cell < C; ++cell) plan.order[cell] = cell;
         std::sort(plan.order.begin(), plan.order.end(), [&](int a, int b) {
             return dot(mesh_.cells[a].center, omega) < dot(mesh_.cells[b].center, omega);

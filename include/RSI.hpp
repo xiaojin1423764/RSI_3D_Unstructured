@@ -47,6 +47,7 @@ public:
     std::vector<double> runSIField(int& convergedN) const;
     std::vector<double> runRSIFieldAtN(int N, int sampleCount, int tailExtra) const;
     Figure5Fields runFigure5GPU(int sampleCount, int tailExtra) const;
+    void printSweepPlanStats() const;
     static void writeFieldCSV(const std::string& file,
                               const Mesh& mesh,
                               const std::vector<double>& phi0);

@@ -6,6 +6,8 @@
 
 struct SweepPlan {
     std::vector<int> order;
+    std::vector<int> levelCells;
+    std::vector<int> levelOffsets;
     bool hasCycle = false;
 };
 

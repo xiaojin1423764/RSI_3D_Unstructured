@@ -113,6 +113,16 @@ struct DeviceMeshView {
     const int* refFace;
     const int* refNeighbor;
     const int* refSign;
+    const double* refNx;
+    const double* refNy;
+    const double* refNz;
+    const double* refArea;
+    const double* refFx;
+    const double* refFy;
+    const double* refFz;
+    const int* refBcType;
+    const double* refBcValue;
+    const double* refSourceFraction;
     const double* faceNx;
     const double* faceNy;
     const double* faceNz;
@@ -134,6 +144,16 @@ struct DeviceMeshStorage {
     DeviceArray<int> refFace;
     DeviceArray<int> refNeighbor;
     DeviceArray<int> refSign;
+    DeviceArray<double> refNx;
+    DeviceArray<double> refNy;
+    DeviceArray<double> refNz;
+    DeviceArray<double> refArea;
+    DeviceArray<double> refFx;
+    DeviceArray<double> refFy;
+    DeviceArray<double> refFz;
+    DeviceArray<int> refBcType;
+    DeviceArray<double> refBcValue;
+    DeviceArray<double> refSourceFraction;
     DeviceArray<double> faceNx;
     DeviceArray<double> faceNy;
     DeviceArray<double> faceNz;
@@ -156,6 +176,16 @@ struct DeviceMeshStorage {
             refFace.ptr,
             refNeighbor.ptr,
             refSign.ptr,
+            refNx.ptr,
+            refNy.ptr,
+            refNz.ptr,
+            refArea.ptr,
+            refFx.ptr,
+            refFy.ptr,
+            refFz.ptr,
+            refBcType.ptr,
+            refBcValue.ptr,
+            refSourceFraction.ptr,
             faceNx.ptr,
             faceNy.ptr,
             faceNz.ptr,
@@ -185,9 +215,22 @@ DeviceMeshStorage uploadMesh(const Mesh& mesh) {
 
     std::vector<double> volume(C), sigmaT(C), sigmaS(C), cellQ(C);
     std::vector<int> offsets(C + 1, 0), refFace, refNeighbor, refSign;
+    std::vector<double> refNx, refNy, refNz, refArea, refFx, refFy, refFz;
+    std::vector<double> refBcValue, refSourceFraction;
+    std::vector<int> refBcType;
     refFace.reserve(static_cast<std::size_t>(C) * 4);
     refNeighbor.reserve(static_cast<std::size_t>(C) * 4);
     refSign.reserve(static_cast<std::size_t>(C) * 4);
+    refNx.reserve(static_cast<std::size_t>(C) * 4);
+    refNy.reserve(static_cast<std::size_t>(C) * 4);
+    refNz.reserve(static_cast<std::size_t>(C) * 4);
+    refArea.reserve(static_cast<std::size_t>(C) * 4);
+    refFx.reserve(static_cast<std::size_t>(C) * 4);
+    refFy.reserve(static_cast<std::size_t>(C) * 4);
+    refFz.reserve(static_cast<std::size_t>(C) * 4);
+    refBcType.reserve(static_cast<std::size_t>(C) * 4);
+    refBcValue.reserve(static_cast<std::size_t>(C) * 4);
+    refSourceFraction.reserve(static_cast<std::size_t>(C) * 4);
 
     for (int i = 0; i < C; ++i) {
         const Cell& cell = mesh.cells[i];
@@ -197,9 +240,20 @@ DeviceMeshStorage uploadMesh(const Mesh& mesh) {
         cellQ[i] = cell.q;
         offsets[i] = static_cast<int>(refFace.size());
         for (const CellFaceRef& ref : cell.faceRefs) {
+            const Face& face = mesh.faces[ref.face];
             refFace.push_back(ref.face);
             refNeighbor.push_back(ref.neighbor);
             refSign.push_back(ref.sign);
+            refNx.push_back(ref.sign > 0 ? face.normal.x : -face.normal.x);
+            refNy.push_back(ref.sign > 0 ? face.normal.y : -face.normal.y);
+            refNz.push_back(ref.sign > 0 ? face.normal.z : -face.normal.z);
+            refArea.push_back(face.area);
+            refFx.push_back(face.center.x);
+            refFy.push_back(face.center.y);
+            refFz.push_back(face.center.z);
+            refBcType.push_back(boundaryType(face.bc_type));
+            refBcValue.push_back(face.bc_value);
+            refSourceFraction.push_back(face.source_fraction);
         }
     }
     offsets[C] = static_cast<int>(refFace.size());
@@ -229,6 +283,16 @@ DeviceMeshStorage uploadMesh(const Mesh& mesh) {
     storage.refFace.copyFrom(refFace);
     storage.refNeighbor.copyFrom(refNeighbor);
     storage.refSign.copyFrom(refSign);
+    storage.refNx.copyFrom(refNx);
+    storage.refNy.copyFrom(refNy);
+    storage.refNz.copyFrom(refNz);
+    storage.refArea.copyFrom(refArea);
+    storage.refFx.copyFrom(refFx);
+    storage.refFy.copyFrom(refFy);
+    storage.refFz.copyFrom(refFz);
+    storage.refBcType.copyFrom(refBcType);
+    storage.refBcValue.copyFrom(refBcValue);
+    storage.refSourceFraction.copyFrom(refSourceFraction);
     storage.faceNx.copyFrom(nx);
     storage.faceNy.copyFrom(ny);
     storage.faceNz.copyFrom(nz);
@@ -242,17 +306,17 @@ DeviceMeshStorage uploadMesh(const Mesh& mesh) {
     return storage;
 }
 
-__device__ double boundaryInflow(
+__device__ double boundaryInflowRef(
     const DeviceMeshView& mesh,
-    int face,
+    int refIndex,
     double ox,
     double oy,
     double oz,
     int sourceShape
 ) {
-    const int type = mesh.faceBcType[face];
+    const int type = mesh.refBcType[refIndex];
     if (type == BC_VACUUM || type == BC_INTERNAL) return 0.0;
-    if (type == BC_INFLOW) return mesh.faceBcValue[face];
+    if (type == BC_INFLOW) return mesh.refBcValue[refIndex];
     if (type != BC_EXAMPLE1) return 0.0;
 
     constexpr double centerX = 0.5;
@@ -262,20 +326,20 @@ __device__ double boundaryInflow(
     constexpr double pi = 3.141592653589793238462643383279502884;
     const double radius = 0.2 / sqrt(pi);
 
-    if (fabs(mesh.faceFy[face]) >= 1.0e-10 || oy <= 0.0) return 0.0;
+    if (fabs(mesh.refFy[refIndex]) >= 1.0e-10 || oy <= 0.0) return 0.0;
 
     double fraction = 0.0;
     if (sourceShape == 0) {
         fraction =
-            fabs(mesh.faceFx[face] - centerX) <= halfLengthX &&
-            fabs(mesh.faceFz[face] - centerZ) <= halfWidthZ
+            fabs(mesh.refFx[refIndex] - centerX) <= halfLengthX &&
+            fabs(mesh.refFz[refIndex] - centerZ) <= halfWidthZ
                 ? 1.0
                 : 0.0;
     } else {
-        fraction = mesh.faceSourceFraction[face];
+        fraction = mesh.refSourceFraction[refIndex];
         if (fraction >= 1.0) {
-            const double dx = mesh.faceFx[face] - centerX;
-            const double dz = mesh.faceFz[face] - centerZ;
+            const double dx = mesh.refFx[refIndex] - centerX;
+            const double dz = mesh.refFz[refIndex] - centerZ;
             fraction = dx * dx + dz * dz <= radius * radius ? 1.0 : 0.0;
         }
     }
@@ -326,13 +390,11 @@ __global__ void sweepSamplesKernel(
         const int begin = mesh.cellFaceOffsets[cell];
         const int end = mesh.cellFaceOffsets[cell + 1];
         for (int refIndex = begin + faceLane; refIndex < end; refIndex += faceLanes) {
-            const int face = mesh.refFace[refIndex];
-            const int sign = mesh.refSign[refIndex];
-            const double nx = sign > 0 ? mesh.faceNx[face] : -mesh.faceNx[face];
-            const double ny = sign > 0 ? mesh.faceNy[face] : -mesh.faceNy[face];
-            const double nz = sign > 0 ? mesh.faceNz[face] : -mesh.faceNz[face];
+            const double nx = mesh.refNx[refIndex];
+            const double ny = mesh.refNy[refIndex];
+            const double nz = mesh.refNz[refIndex];
             const double mu = ox * nx + oy * ny + oz * nz;
-            const double coefficient = fabs(mu) * mesh.faceArea[face];
+            const double coefficient = fabs(mu) * mesh.refArea[refIndex];
             if (coefficient <= 1.0e-14) continue;
 
             if (mu > 0.0) {
@@ -341,7 +403,7 @@ __global__ void sweepSamplesKernel(
                 const int neighbor = mesh.refNeighbor[refIndex];
                 const double psiIn = neighbor >= 0
                     ? currentPsi[static_cast<std::size_t>(sample) * C + neighbor]
-                    : boundaryInflow(mesh, face, ox, oy, oz, sourceShape);
+                    : boundaryInflowRef(mesh, refIndex, ox, oy, oz, sourceShape);
                 inflow += coefficient * psiIn;
             }
         }
@@ -360,6 +422,148 @@ __global__ void sweepSamplesKernel(
         }
         __syncwarp(mask);
     }
+}
+
+__global__ void sweepLevelKernel(
+    DeviceMeshView mesh,
+    const double* ordinateX,
+    const double* ordinateY,
+    const double* ordinateZ,
+    const int* sweepOrders,
+    const int* sweepLevelOffsetBase,
+    const int* sweepLevelCount,
+    const int* sweepLevelOffsets,
+    const int* selectedDirection,
+    int directionBatch,
+    int sourceShape,
+    const double* previousPsi,
+    double* currentPsi,
+    bool sourceShared,
+    int level
+) {
+    const int localDirection = blockIdx.x;
+    if (localDirection >= directionBatch) return;
+
+    const int C = mesh.cellCount;
+    const int direction = selectedDirection[localDirection];
+    const int levelCount = sweepLevelCount[direction];
+    if (level >= levelCount) return;
+
+    const double ox = ordinateX[direction];
+    const double oy = ordinateY[direction];
+    const double oz = ordinateZ[direction];
+    const int* order = sweepOrders + static_cast<std::size_t>(direction) * C;
+    const int levelBase = sweepLevelOffsetBase[direction];
+    const int begin = sweepLevelOffsets[levelBase + level];
+    const int end = sweepLevelOffsets[levelBase + level + 1];
+
+    for (int index = begin + threadIdx.x; index < end; index += blockDim.x) {
+        const int cell = order[index];
+        const std::size_t outputIndex = static_cast<std::size_t>(
+            sourceShared ? direction : localDirection
+        );
+        const std::size_t cellIndex = outputIndex * C + cell;
+        double inflow = 0.0;
+        double outflow = 0.0;
+
+        const int faceBegin = mesh.cellFaceOffsets[cell];
+        const int faceEnd = mesh.cellFaceOffsets[cell + 1];
+        for (int refIndex = faceBegin; refIndex < faceEnd; ++refIndex) {
+            const double nx = mesh.refNx[refIndex];
+            const double ny = mesh.refNy[refIndex];
+            const double nz = mesh.refNz[refIndex];
+            const double mu = ox * nx + oy * ny + oz * nz;
+            const double coefficient = fabs(mu) * mesh.refArea[refIndex];
+            if (coefficient <= 1.0e-14) continue;
+
+            if (mu > 0.0) {
+                outflow += coefficient;
+            } else {
+                const int neighbor = mesh.refNeighbor[refIndex];
+                const double psiIn = neighbor >= 0
+                    ? currentPsi[outputIndex * C + neighbor]
+                    : boundaryInflowRef(mesh, refIndex, ox, oy, oz, sourceShape);
+                inflow += coefficient * psiIn;
+            }
+        }
+
+        const double source = sourceShared ? previousPsi[cell] : previousPsi[cellIndex];
+        const double rhs =
+            mesh.volume[cell] * (mesh.sigmaS[cell] * source + mesh.cellQ[cell]) + inflow;
+        const double diagonal = mesh.sigmaT[cell] * mesh.volume[cell] + outflow;
+        currentPsi[cellIndex] = rhs / diagonal;
+    }
+}
+
+__global__ void sweepLevelTiledKernel(
+    DeviceMeshView mesh,
+    const double* ordinateX,
+    const double* ordinateY,
+    const double* ordinateZ,
+    const int* sweepOrders,
+    const int* sweepLevelOffsetBase,
+    const int* sweepLevelCount,
+    const int* sweepLevelOffsets,
+    const int* selectedDirection,
+    int directionBatch,
+    int sourceShape,
+    const double* previousPsi,
+    double* currentPsi,
+    bool sourceShared,
+    int level
+) {
+    const int localDirection = blockIdx.x;
+    if (localDirection >= directionBatch) return;
+
+    const int C = mesh.cellCount;
+    const int direction = selectedDirection[localDirection];
+    const int levelCount = sweepLevelCount[direction];
+    if (level >= levelCount) return;
+
+    const double ox = ordinateX[direction];
+    const double oy = ordinateY[direction];
+    const double oz = ordinateZ[direction];
+    const int* order = sweepOrders + static_cast<std::size_t>(direction) * C;
+    const int levelBase = sweepLevelOffsetBase[direction];
+    const int begin = sweepLevelOffsets[levelBase + level];
+    const int end = sweepLevelOffsets[levelBase + level + 1];
+    const int index = begin + static_cast<int>(blockIdx.y) * blockDim.x + threadIdx.x;
+    if (index >= end) return;
+
+    const int cell = order[index];
+    const std::size_t outputIndex = static_cast<std::size_t>(
+        sourceShared ? direction : localDirection
+    );
+    const std::size_t cellIndex = outputIndex * C + cell;
+    double inflow = 0.0;
+    double outflow = 0.0;
+
+    const int faceBegin = mesh.cellFaceOffsets[cell];
+    const int faceEnd = mesh.cellFaceOffsets[cell + 1];
+    for (int refIndex = faceBegin; refIndex < faceEnd; ++refIndex) {
+        const double nx = mesh.refNx[refIndex];
+        const double ny = mesh.refNy[refIndex];
+        const double nz = mesh.refNz[refIndex];
+        const double mu = ox * nx + oy * ny + oz * nz;
+        const double coefficient = fabs(mu) * mesh.refArea[refIndex];
+        if (coefficient <= 1.0e-14) continue;
+
+        if (mu > 0.0) {
+            outflow += coefficient;
+        } else {
+            const int neighbor = mesh.refNeighbor[refIndex];
+            const double psiIn = neighbor >= 0
+                ? currentPsi[outputIndex * C + neighbor]
+                : boundaryInflowRef(mesh, refIndex, ox, oy, oz, sourceShape);
+            inflow += coefficient * psiIn;
+        }
+    }
+
+    const double source = sourceShared ? previousPsi[cell] : previousPsi[cellIndex];
+    const double rhs =
+        mesh.volume[cell] * (mesh.sigmaS[cell] * source + mesh.cellQ[cell]) + inflow;
+    const double diagonal = mesh.sigmaT[cell] * mesh.volume[cell] + outflow;
+    currentPsi[cellIndex] = rhs / diagonal;
 }
 
 __global__ void reduceSamplesKernel(
@@ -448,7 +652,11 @@ std::vector<int> generateDirectionSchedule(
 struct DeviceProblem {
     int cellCount = 0;
     int directionCount = 0;
+    int maxSweepLevelCount = 0;
+    int maxSweepLevelWidth = 0;
     std::vector<unsigned char> hostHasCycle;
+    std::vector<int> hostLevelCount;
+    std::vector<int> hostAcyclicDirections;
     DeviceMeshStorage mesh;
     DeviceArray<double> ordinateX;
     DeviceArray<double> ordinateY;
@@ -456,7 +664,11 @@ struct DeviceProblem {
     DeviceArray<double> weights;
     DeviceArray<unsigned char> hasCycle;
     DeviceArray<int> orders;
+    DeviceArray<int> levelOffsetBase;
+    DeviceArray<int> levelCount;
+    DeviceArray<int> levelOffsets;
     DeviceArray<int> allDirections;
+    DeviceArray<int> acyclicDirections;
 };
 
 int sameCycleRunEnd(
@@ -468,6 +680,12 @@ int sameCycleRunEnd(
     int current = begin + 1;
     while (current < end && hasCycle[current] == value) ++current;
     return current;
+}
+
+bool envFlagEnabled(const char* name, bool defaultValue) {
+    const char* value = std::getenv(name);
+    if (!value) return defaultValue;
+    return std::atoi(value) != 0;
 }
 
 std::unique_ptr<DeviceProblem> uploadProblem(
@@ -487,7 +705,11 @@ std::unique_ptr<DeviceProblem> uploadProblem(
     problem->mesh = uploadMesh(mesh);
     std::vector<double> ox(M), oy(M), oz(M), weights(M);
     std::vector<unsigned char> hasCycle(M);
+    std::vector<int> levelOffsetBase(M, 0);
+    std::vector<int> levelCount(M, 0);
+    std::vector<int> levelOffsets;
     std::vector<int> directions(M);
+    std::vector<int> acyclicDirections;
     for (int m = 0; m < M; ++m) {
         if (static_cast<int>(sweepPlans[m].order.size()) != C) {
             throw std::runtime_error("CUDA sweep order size mismatch");
@@ -497,6 +719,30 @@ std::unique_ptr<DeviceProblem> uploadProblem(
         oz[m] = ordinates[m].omega.z;
         weights[m] = ordinates[m].weight;
         hasCycle[m] = sweepPlans[m].hasCycle ? 1 : 0;
+        if (!sweepPlans[m].hasCycle) {
+            if (sweepPlans[m].levelOffsets.empty() ||
+                sweepPlans[m].levelOffsets.front() != 0 ||
+                sweepPlans[m].levelOffsets.back() != C) {
+                throw std::runtime_error("CUDA sweep level offsets are inconsistent");
+            }
+            levelOffsetBase[m] = static_cast<int>(levelOffsets.size());
+            levelOffsets.insert(
+                levelOffsets.end(),
+                sweepPlans[m].levelOffsets.begin(),
+                sweepPlans[m].levelOffsets.end()
+            );
+            levelCount[m] = static_cast<int>(sweepPlans[m].levelOffsets.size()) - 1;
+            problem->maxSweepLevelCount =
+                std::max(problem->maxSweepLevelCount, levelCount[m]);
+            for (int level = 0; level < levelCount[m]; ++level) {
+                const int width =
+                    sweepPlans[m].levelOffsets[static_cast<std::size_t>(level + 1)] -
+                    sweepPlans[m].levelOffsets[static_cast<std::size_t>(level)];
+                problem->maxSweepLevelWidth =
+                    std::max(problem->maxSweepLevelWidth, width);
+            }
+            acyclicDirections.push_back(m);
+        }
         directions[m] = m;
     }
     problem->ordinateX.copyFrom(ox);
@@ -504,8 +750,14 @@ std::unique_ptr<DeviceProblem> uploadProblem(
     problem->ordinateZ.copyFrom(oz);
     problem->weights.copyFrom(weights);
     problem->hostHasCycle = hasCycle;
+    problem->hostLevelCount = levelCount;
+    problem->hostAcyclicDirections = acyclicDirections;
     problem->hasCycle.copyFrom(hasCycle);
+    problem->levelOffsetBase.copyFrom(levelOffsetBase);
+    problem->levelCount.copyFrom(levelCount);
+    problem->levelOffsets.copyFrom(levelOffsets);
     problem->allDirections.copyFrom(directions);
+    problem->acyclicDirections.copyFrom(acyclicDirections);
     problem->orders.allocate(static_cast<std::size_t>(M) * C);
     for (int m = 0; m < M; ++m) {
         checkCuda(
@@ -741,34 +993,122 @@ CudaFigure5Result runFigure5Cuda(
 
             gpuTimer.start();
             const int directionsPerBatch = std::max(4, std::min(128, 5000000 / C));
+            constexpr int levelSweepThreads = 256;
+            const bool useSIWavefront = envFlagEnabled("RSI_CUDA_SI_WAVEFRONT", true);
+            const bool useSITiledWavefront =
+                envFlagEnabled("RSI_CUDA_SI_TILED_WAVEFRONT", true);
+            const int siLevelTileCount = std::max(
+                1,
+                (problem->maxSweepLevelWidth + levelSweepThreads - 1) / levelSweepThreads
+            );
+            if (useSIWavefront && !problem->hostAcyclicDirections.empty()) {
+                const int directionBatch =
+                    static_cast<int>(problem->hostAcyclicDirections.size());
+                for (int level = 0; level < problem->maxSweepLevelCount; ++level) {
+                    if (useSITiledWavefront && siLevelTileCount > 1) {
+                        const dim3 grid(directionBatch, siLevelTileCount);
+                        sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
+                            problem->mesh.view(C),
+                            problem->ordinateX.ptr,
+                            problem->ordinateY.ptr,
+                            problem->ordinateZ.ptr,
+                            problem->orders.ptr,
+                            problem->levelOffsetBase.ptr,
+                            problem->levelCount.ptr,
+                            problem->levelOffsets.ptr,
+                            problem->acyclicDirections.ptr,
+                            directionBatch,
+                            sourceShapeCode,
+                            previousPhi,
+                            angularPsi.ptr,
+                            true,
+                            level
+                        );
+                    } else {
+                        sweepLevelKernel<<<directionBatch, levelSweepThreads>>>(
+                            problem->mesh.view(C),
+                            problem->ordinateX.ptr,
+                            problem->ordinateY.ptr,
+                            problem->ordinateZ.ptr,
+                            problem->orders.ptr,
+                            problem->levelOffsetBase.ptr,
+                            problem->levelCount.ptr,
+                            problem->levelOffsets.ptr,
+                            problem->acyclicDirections.ptr,
+                            directionBatch,
+                            sourceShapeCode,
+                            previousPhi,
+                            angularPsi.ptr,
+                            true,
+                            level
+                        );
+                    }
+                    checkCuda(cudaGetLastError(), "launch CUDA SI packed wavefront level");
+                }
+            }
             for (int directionStart = 0; directionStart < M;) {
+                if (useSIWavefront && problem->hostHasCycle[directionStart] == 0) {
+                    ++directionStart;
+                    continue;
+                }
                 const int batchEnd = std::min(directionStart + directionsPerBatch, M);
                 const int runEnd = sameCycleRunEnd(
                     problem->hostHasCycle, directionStart, batchEnd
                 );
                 const int directionBatch = runEnd - directionStart;
-                const int directionSweepBlocks =
-                    (directionBatch + samplesPerSweepBlock - 1) /
-                    samplesPerSweepBlock;
-                const int localPassCount =
-                    problem->hostHasCycle[directionStart] != 0 ? 20 : 1;
-                for (int localPass = 0; localPass < localPassCount; ++localPass) {
-                    sweepSamplesKernel<<<directionSweepBlocks, sweepThreads>>>(
-                        problem->mesh.view(C),
-                        problem->ordinateX.ptr,
-                        problem->ordinateY.ptr,
-                        problem->ordinateZ.ptr,
-                        problem->orders.ptr,
-                        problem->hasCycle.ptr,
-                        problem->allDirections.ptr + directionStart,
-                        directionBatch,
-                        sourceShapeCode,
-                        previousPhi,
-                        angularPsi.ptr + static_cast<std::size_t>(directionStart) * C,
-                        true,
-                        localPass
-                    );
-                    checkCuda(cudaGetLastError(), "launch CUDA SI angular sweep batch");
+
+                if (useSIWavefront && problem->hostHasCycle[directionStart] == 0) {
+                    int maxLevelCount = 0;
+                    for (int direction = directionStart; direction < runEnd; ++direction) {
+                        maxLevelCount = std::max(
+                            maxLevelCount,
+                            problem->hostLevelCount[direction]
+                        );
+                    }
+                    for (int level = 0; level < maxLevelCount; ++level) {
+                        sweepLevelKernel<<<directionBatch, levelSweepThreads>>>(
+                            problem->mesh.view(C),
+                            problem->ordinateX.ptr,
+                            problem->ordinateY.ptr,
+                            problem->ordinateZ.ptr,
+                            problem->orders.ptr,
+                            problem->levelOffsetBase.ptr,
+                            problem->levelCount.ptr,
+                            problem->levelOffsets.ptr,
+                            problem->allDirections.ptr + directionStart,
+                            directionBatch,
+                            sourceShapeCode,
+                            previousPhi,
+                            angularPsi.ptr + static_cast<std::size_t>(directionStart) * C,
+                            true,
+                            level
+                        );
+                        checkCuda(cudaGetLastError(), "launch CUDA SI wavefront sweep level");
+                    }
+                } else {
+                    const int directionSweepBlocks =
+                        (directionBatch + samplesPerSweepBlock - 1) /
+                        samplesPerSweepBlock;
+                    const int localPassCount =
+                        problem->hostHasCycle[directionStart] != 0 ? 20 : 1;
+                    for (int localPass = 0; localPass < localPassCount; ++localPass) {
+                        sweepSamplesKernel<<<directionSweepBlocks, sweepThreads>>>(
+                            problem->mesh.view(C),
+                            problem->ordinateX.ptr,
+                            problem->ordinateY.ptr,
+                            problem->ordinateZ.ptr,
+                            problem->orders.ptr,
+                            problem->hasCycle.ptr,
+                            problem->allDirections.ptr + directionStart,
+                            directionBatch,
+                            sourceShapeCode,
+                            previousPhi,
+                            angularPsi.ptr + static_cast<std::size_t>(directionStart) * C,
+                            true,
+                            localPass
+                        );
+                        checkCuda(cudaGetLastError(), "launch CUDA SI angular sweep batch");
+                    }
                 }
                 directionStart = runEnd;
             }
@@ -903,6 +1243,17 @@ CudaFigure5Result runFigure5Cuda(
     sampleTail.allocate(workspaceCellCount);
     selectedDirections.allocate(static_cast<std::size_t>(batchCapacity) * iterationCount);
     std::vector<int> batchDirections(static_cast<std::size_t>(batchCapacity) * iterationCount);
+    std::vector<unsigned char> batchIterationHasCycle(iterationCount, 0);
+    std::vector<int> batchIterationMaxLevel(iterationCount, 0);
+    const bool useRSIBatchPass = envFlagEnabled("RSI_CUDA_RSI_BATCH_PASS", false);
+    const bool useRSIWavefront = envFlagEnabled("RSI_CUDA_RSI_WAVEFRONT", true);
+    const bool useRSITiledWavefront =
+        envFlagEnabled("RSI_CUDA_RSI_TILED_WAVEFRONT", true);
+    constexpr int levelSweepThreads = 256;
+    const int levelTileCount = std::max(
+        1,
+        (problem->maxSweepLevelWidth + levelSweepThreads - 1) / levelSweepThreads
+    );
 
     for (int batchStart = firstSample; batchStart < sampleCount;
          batchStart += batchCapacity) {
@@ -913,11 +1264,22 @@ CudaFigure5Result runFigure5Cuda(
         checkCuda(cudaMemset(sampleTail.ptr, 0, batchCellCount * sizeof(double)),
                   "clear CUDA RSI-tail batch accumulation");
 
+        std::fill(batchIterationHasCycle.begin(), batchIterationHasCycle.end(), 0);
+        std::fill(batchIterationMaxLevel.begin(), batchIterationMaxLevel.end(), 0);
         for (int iteration = 0; iteration < iterationCount; ++iteration) {
             for (int localSample = 0; localSample < batchSize; ++localSample) {
-                batchDirections[static_cast<std::size_t>(iteration) * batchSize + localSample] =
+                const int direction =
                     schedule[static_cast<std::size_t>(batchStart + localSample) * iterationCount +
                              iteration];
+                batchDirections[static_cast<std::size_t>(iteration) * batchSize + localSample] =
+                    direction;
+                if (problem->hostHasCycle[direction] != 0) {
+                    batchIterationHasCycle[iteration] = 1;
+                }
+                batchIterationMaxLevel[iteration] = std::max(
+                    batchIterationMaxLevel[iteration],
+                    problem->hostLevelCount[direction]
+                );
             }
         }
         const auto directionCopyStart = std::chrono::steady_clock::now();
@@ -939,24 +1301,75 @@ CudaFigure5Result runFigure5Cuda(
             checkCuda(cudaMemset(currentPsi, 0, batchCellCount * sizeof(double)),
                       "clear CUDA RSI current layer");
             gpuTimer.start();
-            for (int localPass = 0; localPass < 20; ++localPass) {
-                sweepSamplesKernel<<<sampleSweepBlocks, sweepThreads>>>(
-                    problem->mesh.view(C),
-                    problem->ordinateX.ptr,
-                    problem->ordinateY.ptr,
-                    problem->ordinateZ.ptr,
-                    problem->orders.ptr,
-                    problem->hasCycle.ptr,
-                    selectedDirections.ptr +
-                        static_cast<std::size_t>(iteration - 1) * batchSize,
-                    batchSize,
-                    sourceShapeCode,
-                    previousPsi,
-                    currentPsi,
-                    false,
-                    localPass
-                );
-                checkCuda(cudaGetLastError(), "launch combined CUDA RSI sweep");
+            const int directionOffset = iteration - 1;
+            const bool iterationHasCycle = batchIterationHasCycle[directionOffset] != 0;
+            const int* iterationDirections =
+                selectedDirections.ptr + static_cast<std::size_t>(directionOffset) * batchSize;
+            const bool useTiledForBatch =
+                useRSITiledWavefront && batchSize >= 64 && levelTileCount > 1;
+            if (useRSIWavefront && !iterationHasCycle) {
+                for (int level = 0; level < batchIterationMaxLevel[directionOffset]; ++level) {
+                    if (useTiledForBatch) {
+                        const dim3 grid(batchSize, levelTileCount);
+                        sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
+                            problem->mesh.view(C),
+                            problem->ordinateX.ptr,
+                            problem->ordinateY.ptr,
+                            problem->ordinateZ.ptr,
+                            problem->orders.ptr,
+                            problem->levelOffsetBase.ptr,
+                            problem->levelCount.ptr,
+                            problem->levelOffsets.ptr,
+                            iterationDirections,
+                            batchSize,
+                            sourceShapeCode,
+                            previousPsi,
+                            currentPsi,
+                            false,
+                            level
+                        );
+                    } else {
+                        sweepLevelKernel<<<batchSize, levelSweepThreads>>>(
+                            problem->mesh.view(C),
+                            problem->ordinateX.ptr,
+                            problem->ordinateY.ptr,
+                            problem->ordinateZ.ptr,
+                            problem->orders.ptr,
+                            problem->levelOffsetBase.ptr,
+                            problem->levelCount.ptr,
+                            problem->levelOffsets.ptr,
+                            iterationDirections,
+                            batchSize,
+                            sourceShapeCode,
+                            previousPsi,
+                            currentPsi,
+                            false,
+                            level
+                        );
+                    }
+                    checkCuda(cudaGetLastError(), "launch combined CUDA RSI wavefront level");
+                }
+            } else {
+                const int localPassCount =
+                    useRSIBatchPass && !iterationHasCycle ? 1 : 20;
+                for (int localPass = 0; localPass < localPassCount; ++localPass) {
+                    sweepSamplesKernel<<<sampleSweepBlocks, sweepThreads>>>(
+                        problem->mesh.view(C),
+                        problem->ordinateX.ptr,
+                        problem->ordinateY.ptr,
+                        problem->ordinateZ.ptr,
+                        problem->orders.ptr,
+                        problem->hasCycle.ptr,
+                        iterationDirections,
+                        batchSize,
+                        sourceShapeCode,
+                        previousPsi,
+                        currentPsi,
+                        false,
+                        localPass
+                    );
+                    checkCuda(cudaGetLastError(), "launch combined CUDA RSI sweep");
+                }
             }
             rsiSweepSeconds += gpuTimer.stop("time CUDA RSI sample sweeps");
             if (iteration == result.convergedN) {
@@ -1052,6 +1465,216 @@ CudaFigure5Result runFigure5Cuda(
               << ", SI_iterations=" << result.convergedN
               << ", samples=" << sampleCount << ", seconds=" << seconds << "\n";
     return result;
+}
+
+std::vector<double> runSIFieldCuda(
+    const Mesh& mesh,
+    const std::vector<Ordinate>& ordinates,
+    const std::vector<SweepPlan>& sweepPlans,
+    const std::string& sourceShape,
+    int maxSIters,
+    double siTolerance,
+    int& convergedN
+) {
+    if (maxSIters <= 0) {
+        throw std::runtime_error("invalid CUDA SI iteration configuration");
+    }
+    std::string unavailableReason;
+    if (!cudaRSIAvailable(&unavailableReason)) {
+        throw std::runtime_error("CUDA unavailable: " + unavailableReason);
+    }
+
+    const auto totalStart = std::chrono::steady_clock::now();
+    const auto uploadStart = std::chrono::steady_clock::now();
+    std::unique_ptr<DeviceProblem> problem = uploadProblem(mesh, ordinates, sweepPlans);
+    checkCuda(cudaDeviceSynchronize(), "synchronize CUDA SI problem upload");
+    const double uploadSeconds =
+        secondsBetween(uploadStart, std::chrono::steady_clock::now());
+
+    const int C = problem->cellCount;
+    const int M = problem->directionCount;
+    const int sourceShapeCode = sourceShape == "rectangle" ? 0 : 1;
+    constexpr int sweepThreads = 128;
+    constexpr int samplesPerSweepBlock = 32;
+    constexpr int reductionThreads = 256;
+    constexpr int levelSweepThreads = 256;
+    const int cellBlocks = (C + reductionThreads - 1) / reductionThreads;
+
+    CudaEventTimer gpuTimer;
+    double siClearSeconds = 0.0;
+    double siSweepSeconds = 0.0;
+    double siReduceSeconds = 0.0;
+    double siNormSeconds = 0.0;
+    double siCopySeconds = 0.0;
+
+    const std::size_t angularValueCount = static_cast<std::size_t>(M) * C;
+    DeviceArray<double> angularPsi, phiA, phiB, normValues;
+    angularPsi.allocate(angularValueCount);
+    phiA.allocate(C);
+    phiB.allocate(C);
+    normValues.allocate(2);
+    checkCuda(cudaMemset(phiA.ptr, 0, static_cast<std::size_t>(C) * sizeof(double)),
+              "clear CUDA SI-only initial source");
+
+    double* previousPhi = phiA.ptr;
+    double* currentPhi = phiB.ptr;
+    convergedN = maxSIters;
+    const int directionsPerBatch = std::max(4, std::min(128, 5000000 / C));
+    const bool useSIWavefront = envFlagEnabled("RSI_CUDA_SI_WAVEFRONT", true);
+    const bool useSITiledWavefront =
+        envFlagEnabled("RSI_CUDA_SI_TILED_WAVEFRONT", true);
+    const int siLevelTileCount = std::max(
+        1,
+        (problem->maxSweepLevelWidth + levelSweepThreads - 1) / levelSweepThreads
+    );
+
+    for (int iteration = 1; iteration <= maxSIters; ++iteration) {
+        gpuTimer.start();
+        checkCuda(cudaMemset(angularPsi.ptr, 0, angularValueCount * sizeof(double)),
+                  "clear CUDA SI-only angular field");
+        siClearSeconds += gpuTimer.stop("time CUDA SI-only angular clear");
+
+        gpuTimer.start();
+        if (useSIWavefront && !problem->hostAcyclicDirections.empty()) {
+            const int directionBatch =
+                static_cast<int>(problem->hostAcyclicDirections.size());
+            for (int level = 0; level < problem->maxSweepLevelCount; ++level) {
+                if (useSITiledWavefront && siLevelTileCount > 1) {
+                    const dim3 grid(directionBatch, siLevelTileCount);
+                    sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
+                        problem->mesh.view(C),
+                        problem->ordinateX.ptr,
+                        problem->ordinateY.ptr,
+                        problem->ordinateZ.ptr,
+                        problem->orders.ptr,
+                        problem->levelOffsetBase.ptr,
+                        problem->levelCount.ptr,
+                        problem->levelOffsets.ptr,
+                        problem->acyclicDirections.ptr,
+                        directionBatch,
+                        sourceShapeCode,
+                        previousPhi,
+                        angularPsi.ptr,
+                        true,
+                        level
+                    );
+                } else {
+                    sweepLevelKernel<<<directionBatch, levelSweepThreads>>>(
+                        problem->mesh.view(C),
+                        problem->ordinateX.ptr,
+                        problem->ordinateY.ptr,
+                        problem->ordinateZ.ptr,
+                        problem->orders.ptr,
+                        problem->levelOffsetBase.ptr,
+                        problem->levelCount.ptr,
+                        problem->levelOffsets.ptr,
+                        problem->acyclicDirections.ptr,
+                        directionBatch,
+                        sourceShapeCode,
+                        previousPhi,
+                        angularPsi.ptr,
+                        true,
+                        level
+                    );
+                }
+                checkCuda(cudaGetLastError(), "launch CUDA SI-only packed wavefront level");
+            }
+        }
+        for (int directionStart = 0; directionStart < M;) {
+            if (useSIWavefront && problem->hostHasCycle[directionStart] == 0) {
+                ++directionStart;
+                continue;
+            }
+            const int batchEnd = std::min(directionStart + directionsPerBatch, M);
+            const int runEnd = sameCycleRunEnd(
+                problem->hostHasCycle, directionStart, batchEnd
+            );
+            const int directionBatch = runEnd - directionStart;
+            const int directionSweepBlocks =
+                (directionBatch + samplesPerSweepBlock - 1) / samplesPerSweepBlock;
+            const int localPassCount =
+                problem->hostHasCycle[directionStart] != 0 ? 20 : 1;
+            for (int localPass = 0; localPass < localPassCount; ++localPass) {
+                sweepSamplesKernel<<<directionSweepBlocks, sweepThreads>>>(
+                    problem->mesh.view(C),
+                    problem->ordinateX.ptr,
+                    problem->ordinateY.ptr,
+                    problem->ordinateZ.ptr,
+                    problem->orders.ptr,
+                    problem->hasCycle.ptr,
+                    problem->allDirections.ptr + directionStart,
+                    directionBatch,
+                    sourceShapeCode,
+                    previousPhi,
+                    angularPsi.ptr + static_cast<std::size_t>(directionStart) * C,
+                    true,
+                    localPass
+                );
+                checkCuda(cudaGetLastError(), "launch CUDA SI-only angular sweep batch");
+            }
+            directionStart = runEnd;
+        }
+        siSweepSeconds += gpuTimer.stop("time CUDA SI-only angular sweeps");
+
+        gpuTimer.start();
+        reduceDirectionsKernel<<<cellBlocks, reductionThreads>>>(
+            angularPsi.ptr, problem->weights.ptr, M, C, currentPhi
+        );
+        checkCuda(cudaGetLastError(), "launch CUDA SI-only angular reduction");
+        siReduceSeconds += gpuTimer.stop("time CUDA SI-only angular reduction");
+
+        bool converged = false;
+        double relative = 0.0;
+        gpuTimer.start();
+        if (iteration > 1) {
+            checkCuda(cudaMemset(normValues.ptr, 0, 2 * sizeof(double)),
+                      "clear CUDA SI-only norm values");
+            relativeNormKernel<<<cellBlocks, reductionThreads>>>(
+                currentPhi, previousPhi, problem->mesh.volume.ptr, C,
+                normValues.ptr, normValues.ptr + 1
+            );
+            checkCuda(cudaGetLastError(), "launch CUDA SI-only convergence norm");
+            double hostNorms[2] = {0.0, 0.0};
+            checkCuda(
+                cudaMemcpy(hostNorms, normValues.ptr, 2 * sizeof(double),
+                           cudaMemcpyDeviceToHost),
+                "copy CUDA SI-only convergence norm"
+            );
+            relative = std::sqrt(hostNorms[0] / std::max(hostNorms[1], 1.0e-300));
+            converged = relative < siTolerance;
+        } else {
+            checkCuda(cudaDeviceSynchronize(), "synchronize first CUDA SI-only iteration");
+        }
+        siNormSeconds += gpuTimer.stop("time CUDA SI-only convergence norm");
+        std::cerr << "CUDA SI-only iteration=" << iteration
+                  << ", relative=" << relative << "\n";
+
+        std::swap(previousPhi, currentPhi);
+        convergedN = iteration;
+        if (converged) break;
+    }
+
+    std::vector<double> phi(C);
+    const auto siCopyStart = std::chrono::steady_clock::now();
+    checkCuda(
+        cudaMemcpy(phi.data(), previousPhi,
+                   static_cast<std::size_t>(C) * sizeof(double), cudaMemcpyDeviceToHost),
+        "copy CUDA SI-only result"
+    );
+    siCopySeconds += secondsBetween(siCopyStart, std::chrono::steady_clock::now());
+
+    const double totalSeconds = secondsBetween(totalStart, std::chrono::steady_clock::now());
+    std::cout << "CUDA SI-only timing: upload=" << uploadSeconds
+              << ", total=" << totalSeconds
+              << ", si_clear=" << siClearSeconds
+              << ", si_sweep=" << siSweepSeconds
+              << ", si_reduce=" << siReduceSeconds
+              << ", si_norm=" << siNormSeconds
+              << ", si_copy=" << siCopySeconds << "\n";
+    std::cout << "CUDA SI-only complete: cells=" << C << ", directions=" << M
+              << ", SI_iterations=" << convergedN
+              << ", seconds=" << totalSeconds << "\n";
+    return phi;
 }
 
 std::vector<double> runRSIFieldAtNCuda(
@@ -1154,6 +1777,8 @@ std::vector<double> runRSIFieldAtNCuda(
     sampleAccum.allocate(workspaceCellCount);
     deviceDirections.allocate(static_cast<std::size_t>(batchCapacity) * iterationCount);
     std::vector<int> batchDirections(static_cast<std::size_t>(batchCapacity) * iterationCount);
+    std::vector<unsigned char> batchIterationHasCycle(iterationCount, 0);
+    const bool useRSIBatchPass = envFlagEnabled("RSI_CUDA_RSI_BATCH_PASS", false);
 
     for (int batchStart = 0; batchStart < sampleCount; batchStart += batchCapacity) {
         const int batchSize = std::min(batchCapacity, sampleCount - batchStart);
@@ -1165,11 +1790,17 @@ std::vector<double> runRSIFieldAtNCuda(
         checkCuda(cudaMemset(sampleAccum.ptr, 0, batchCellCount * sizeof(double)),
                   "clear CUDA RSI batch accumulation");
 
+        std::fill(batchIterationHasCycle.begin(), batchIterationHasCycle.end(), 0);
         for (int iteration = 0; iteration < iterationCount; ++iteration) {
             for (int localSample = 0; localSample < batchSize; ++localSample) {
                 const int globalSample = batchStart + localSample;
-                batchDirections[static_cast<std::size_t>(iteration) * batchSize + localSample] =
+                const int direction =
                     schedule[static_cast<std::size_t>(globalSample) * iterationCount + iteration];
+                batchDirections[static_cast<std::size_t>(iteration) * batchSize + localSample] =
+                    direction;
+                if (hasCycle[direction] != 0) {
+                    batchIterationHasCycle[iteration] = 1;
+                }
             }
         }
         checkCuda(
@@ -1187,7 +1818,9 @@ std::vector<double> runRSIFieldAtNCuda(
         for (int iteration = 0; iteration < iterationCount; ++iteration) {
             checkCuda(cudaMemset(current, 0, batchCellCount * sizeof(double)),
                       "clear CUDA RSI current layer");
-            for (int localPass = 0; localPass < 20; ++localPass) {
+            const int localPassCount =
+                useRSIBatchPass && batchIterationHasCycle[iteration] == 0 ? 1 : 20;
+            for (int localPass = 0; localPass < localPassCount; ++localPass) {
                 constexpr int sweepThreads = 128;
                 constexpr int samplesPerSweepBlock = 32;
                 const int sweepBlocks =

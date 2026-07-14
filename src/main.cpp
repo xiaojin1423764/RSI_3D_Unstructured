@@ -37,7 +37,7 @@ static void printUsage(const char* prog) {
     std::cerr
         << "用法:\n"
         << "  " << prog << " [cells.csv faces.csv [figure2_data.csv] [rectangle|circle]]\n"
-        << "  " << prog << " --source-shape rectangle|circle [--gpu] [--out figure2_data.csv] [--figure5-dir examples/csv_data] [--only all|figure2|figure5] [cells.csv faces.csv]\n";
+        << "  " << prog << " --source-shape rectangle|circle [--gpu] [--out figure2_data.csv] [--figure5-dir examples/csv_data] [--only all|figure2|figure5|sweep-stats] [cells.csv faces.csv]\n";
 }
 
 int main(int argc, char** argv) {
@@ -111,8 +111,9 @@ int main(int argc, char** argv) {
         if (!isSourceShape(sourceShape)) {
             throw std::runtime_error("入射区域形状必须是 rectangle 或 circle");
         }
-        if (only != "all" && only != "figure2" && only != "figure5") {
-            throw std::runtime_error("--only 必须是 all、figure2 或 figure5");
+        if (only != "all" && only != "figure2" && only != "figure5" &&
+            only != "sweep-stats") {
+            throw std::runtime_error("--only 必须是 all、figure2、figure5 或 sweep-stats");
         }
 
         Mesh mesh = Mesh::readCSV(cellsFile, facesFile);
@@ -121,6 +122,21 @@ int main(int argc, char** argv) {
         std::cout << "入射区域形状: " << sourceShape << " (" << figurePrefix << ")\n";
         if (useGPU) {
             std::cout << "GPU模式: RSI/RSI-tail使用CUDA样本并行；SI使用CUDA角度并行；Figure 2保持CPU路径\n";
+        }
+
+        if (only == "sweep-stats") {
+            for (int angularN : {4, 32}) {
+                RSIConfig cfg;
+                cfg.groupCount = 1;
+                cfg.angularN = angularN;
+                cfg.maxSIters = 1;
+                cfg.scattering = "isotropic";
+                cfg.sourceShape = sourceShape;
+                std::cout << "Sweep stats for S" << angularN << ":\n";
+                RSISolver solver(mesh, cfg);
+                solver.printSweepPlanStats();
+            }
+            return 0;
         }
 
         if (only == "all" || only == "figure2") {
@@ -165,9 +181,17 @@ int main(int argc, char** argv) {
             coarseCfg.sourceShape = sourceShape;
             coarseCfg.seed = 20260513u;
 
-            RSISolver coarseSolver(mesh, coarseCfg);
             int Ncoarse = 0;
-            auto phiSIcoarse = coarseSolver.runSIField(Ncoarse);
+            std::vector<double> phiSIcoarse;
+            if (useGPU) {
+                coarseCfg.useGPU = true;
+                RSISolver coarseGpuSolver(mesh, coarseCfg);
+                phiSIcoarse = coarseGpuSolver.runSIField(Ncoarse);
+                std::cout << "GPU Figure 5 coarse SI converged at N=" << Ncoarse << "\n";
+            } else {
+                RSISolver coarseSolver(mesh, coarseCfg);
+                phiSIcoarse = coarseSolver.runSIField(Ncoarse);
+            }
             const std::string siCoarseFile = figure5OutputPath(figure5Dir, figurePrefix, "figure5_SI_coarse.csv");
             const std::string siFineFile = figure5OutputPath(figure5Dir, figurePrefix, "figure5_SI_fine.csv");
             const std::string rsiFile = figure5OutputPath(figure5Dir, figurePrefix, "figure5_RSI.csv");

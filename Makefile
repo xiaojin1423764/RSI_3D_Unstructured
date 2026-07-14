@@ -29,7 +29,7 @@ $(GPU_BUILD_DIR)/TransportSweep.o: include/TransportSweep.hpp include/Mesh.hpp
 $(GPU_BUILD_DIR)/Mesh.o: include/Mesh.hpp include/Types.hpp
 $(GPU_BUILD_DIR)/Quadrature.o: include/Quadrature.hpp include/Types.hpp
 
-$(GPU_BUILD_DIR)/CudaRSI.o: src/CudaRSI.cu include/CudaRSI.hpp | $(GPU_BUILD_DIR)
+$(GPU_BUILD_DIR)/CudaRSI.o: src/CudaRSI.cu include/CudaRSI.hpp include/RSI.hpp include/TransportSweep.hpp include/Mesh.hpp | $(GPU_BUILD_DIR)
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 
 $(GPU_BUILD_DIR)/main.o: src/main.cpp include/RSI.hpp include/Mesh.hpp | $(GPU_BUILD_DIR)

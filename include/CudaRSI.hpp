@@ -27,6 +27,16 @@ CudaFigure5Result runFigure5Cuda(
     int tailExtra
 );
 
+std::vector<double> runSIFieldCuda(
+    const Mesh& mesh,
+    const std::vector<Ordinate>& ordinates,
+    const std::vector<SweepPlan>& sweepPlans,
+    const std::string& sourceShape,
+    int maxSIters,
+    double siTolerance,
+    int& convergedN
+);
+
 std::vector<double> runRSIFieldAtNCuda(
     const Mesh& mesh,
     const std::vector<Ordinate>& ordinates,

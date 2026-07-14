@@ -6,13 +6,316 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <cstdint>
+#include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <mutex>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <thread>
+
+namespace {
+
+constexpr std::uint64_t sweepPlanCacheMagic = 0x5253495357504331ULL;
+constexpr std::uint32_t sweepPlanCacheVersion = 1;
+
+struct SweepPlanCacheHeader {
+    std::uint64_t magic;
+    std::uint32_t version;
+    std::uint32_t reserved;
+    std::uint64_t key;
+    std::uint64_t directionCount;
+    std::uint64_t cellCount;
+};
+
+std::uint64_t fnv1aBytes(std::uint64_t hash, const void* data, std::size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < size; ++i) {
+        hash ^= static_cast<std::uint64_t>(bytes[i]);
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+template <typename T>
+std::uint64_t fnv1aValue(std::uint64_t hash, const T& value) {
+    return fnv1aBytes(hash, &value, sizeof(T));
+}
+
+std::uint64_t fnv1aString(std::uint64_t hash, const std::string& value) {
+    const std::uint64_t size = static_cast<std::uint64_t>(value.size());
+    hash = fnv1aValue(hash, size);
+    return fnv1aBytes(hash, value.data(), value.size());
+}
+
+std::uint64_t sweepPlanCacheKey(
+    const Mesh& mesh,
+    const std::vector<Ordinate>& ordinates,
+    const RSIConfig& cfg
+) {
+    std::uint64_t hash = 1469598103934665603ULL;
+    hash = fnv1aValue(hash, sweepPlanCacheVersion);
+    hash = fnv1aValue(hash, cfg.angularN);
+    hash = fnv1aString(hash, cfg.sourceShape);
+    const std::uint64_t cellCount = static_cast<std::uint64_t>(mesh.cells.size());
+    const std::uint64_t faceCount = static_cast<std::uint64_t>(mesh.faces.size());
+    hash = fnv1aValue(hash, cellCount);
+    hash = fnv1aValue(hash, faceCount);
+    for (const Cell& cell : mesh.cells) {
+        hash = fnv1aValue(hash, cell.id);
+        hash = fnv1aValue(hash, cell.center.x);
+        hash = fnv1aValue(hash, cell.center.y);
+        hash = fnv1aValue(hash, cell.center.z);
+        hash = fnv1aValue(hash, cell.volume);
+        const std::uint64_t refCount = static_cast<std::uint64_t>(cell.faceRefs.size());
+        hash = fnv1aValue(hash, refCount);
+        for (const CellFaceRef& ref : cell.faceRefs) {
+            hash = fnv1aValue(hash, ref.face);
+            hash = fnv1aValue(hash, ref.neighbor);
+            hash = fnv1aValue(hash, ref.sign);
+        }
+    }
+    for (const Face& face : mesh.faces) {
+        hash = fnv1aValue(hash, face.id);
+        hash = fnv1aValue(hash, face.left_cell);
+        hash = fnv1aValue(hash, face.right_cell);
+        hash = fnv1aValue(hash, face.normal.x);
+        hash = fnv1aValue(hash, face.normal.y);
+        hash = fnv1aValue(hash, face.normal.z);
+        hash = fnv1aValue(hash, face.area);
+    }
+    for (const Ordinate& ordinate : ordinates) {
+        hash = fnv1aValue(hash, ordinate.omega.x);
+        hash = fnv1aValue(hash, ordinate.omega.y);
+        hash = fnv1aValue(hash, ordinate.omega.z);
+        hash = fnv1aValue(hash, ordinate.weight);
+    }
+    return hash;
+}
+
+bool sweepPlanCacheEnabled() {
+    const char* value = std::getenv("RSI_SWEEP_PLAN_CACHE");
+    return !value || std::atoi(value) != 0;
+}
+
+std::string sweepPlanCachePath(std::uint64_t key) {
+    std::ostringstream name;
+    const char* dir = std::getenv("RSI_SWEEP_PLAN_CACHE_DIR");
+    if (dir && *dir) {
+        name << dir;
+        const std::string dirString(dir);
+        if (!dirString.empty() && dirString.back() != '/') name << '/';
+    } else {
+        name << "results/cache/";
+    }
+    name << "rsi_sweep_plan_" << std::hex << key << ".bin";
+    return name.str();
+}
+
+void readExact(std::ifstream& input, void* data, std::size_t size, const char* label) {
+    input.read(static_cast<char*>(data), static_cast<std::streamsize>(size));
+    if (!input) throw std::runtime_error(std::string("truncated sweep plan cache: ") + label);
+}
+
+void writeExact(std::ofstream& output, const void* data, std::size_t size) {
+    output.write(static_cast<const char*>(data), static_cast<std::streamsize>(size));
+    if (!output) throw std::runtime_error("failed while writing sweep plan cache");
+}
+
+bool loadSweepPlanCache(
+    const std::string& path,
+    std::uint64_t key,
+    std::size_t directionCount,
+    std::size_t cellCount,
+    std::vector<SweepPlan>& plans
+) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    SweepPlanCacheHeader header{};
+    readExact(input, &header, sizeof(header), "header");
+    if (header.magic != sweepPlanCacheMagic ||
+        header.version != sweepPlanCacheVersion ||
+        header.key != key ||
+        header.directionCount != directionCount ||
+        header.cellCount != cellCount) {
+        return false;
+    }
+
+    plans.clear();
+    plans.resize(directionCount);
+    for (std::size_t direction = 0; direction < directionCount; ++direction) {
+        std::uint32_t hasCycle = 0;
+        std::uint64_t orderSize = 0;
+        std::uint64_t levelOffsetSize = 0;
+        readExact(input, &hasCycle, sizeof(hasCycle), "hasCycle");
+        readExact(input, &orderSize, sizeof(orderSize), "order size");
+        readExact(input, &levelOffsetSize, sizeof(levelOffsetSize), "level offset size");
+        if (orderSize != cellCount) {
+            throw std::runtime_error("sweep plan cache has invalid order size");
+        }
+        SweepPlan& plan = plans[direction];
+        plan.hasCycle = hasCycle != 0;
+        plan.order.resize(static_cast<std::size_t>(orderSize));
+        readExact(
+            input,
+            plan.order.data(),
+            static_cast<std::size_t>(orderSize) * sizeof(int),
+            "order"
+        );
+        plan.levelOffsets.resize(static_cast<std::size_t>(levelOffsetSize));
+        if (levelOffsetSize > 0) {
+            readExact(
+                input,
+                plan.levelOffsets.data(),
+                static_cast<std::size_t>(levelOffsetSize) * sizeof(int),
+                "level offsets"
+            );
+        }
+        if (!plan.hasCycle) {
+            if (plan.levelOffsets.empty() ||
+                plan.levelOffsets.front() != 0 ||
+                plan.levelOffsets.back() != static_cast<int>(cellCount)) {
+                throw std::runtime_error("sweep plan cache has invalid level offsets");
+            }
+            plan.levelCells = plan.order;
+        }
+    }
+    return true;
+}
+
+bool tryLoadSweepPlanCache(
+    const std::string& path,
+    std::uint64_t key,
+    std::size_t directionCount,
+    std::size_t cellCount,
+    std::vector<SweepPlan>& plans
+) {
+    try {
+        return loadSweepPlanCache(path, key, directionCount, cellCount, plans);
+    } catch (const std::exception& e) {
+        plans.clear();
+        std::cerr << "Warning: ignoring sweep plan cache " << path
+                  << ": " << e.what() << "\n";
+        return false;
+    }
+}
+
+void saveSweepPlanCache(
+    const std::string& path,
+    std::uint64_t key,
+    std::size_t directionCount,
+    std::size_t cellCount,
+    const std::vector<SweepPlan>& plans
+) {
+    const std::string tempPath = path + ".tmp";
+    const std::filesystem::path cachePath(path);
+    const std::filesystem::path parent = cachePath.parent_path();
+    if (!parent.empty()) {
+        std::error_code ec;
+        std::filesystem::create_directories(parent, ec);
+        if (ec) {
+            std::cerr << "Warning: cannot create sweep plan cache directory: "
+                      << parent.string() << ": " << ec.message() << "\n";
+            return;
+        }
+    }
+    std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
+    if (!output) {
+        std::cerr << "Warning: cannot write sweep plan cache: " << tempPath << "\n";
+        return;
+    }
+    const SweepPlanCacheHeader header{
+        sweepPlanCacheMagic,
+        sweepPlanCacheVersion,
+        0,
+        key,
+        static_cast<std::uint64_t>(directionCount),
+        static_cast<std::uint64_t>(cellCount)
+    };
+    writeExact(output, &header, sizeof(header));
+    for (const SweepPlan& plan : plans) {
+        const std::uint32_t hasCycle = plan.hasCycle ? 1u : 0u;
+        const std::uint64_t orderSize = static_cast<std::uint64_t>(plan.order.size());
+        const std::uint64_t levelOffsetSize =
+            static_cast<std::uint64_t>(plan.levelOffsets.size());
+        writeExact(output, &hasCycle, sizeof(hasCycle));
+        writeExact(output, &orderSize, sizeof(orderSize));
+        writeExact(output, &levelOffsetSize, sizeof(levelOffsetSize));
+        writeExact(output, plan.order.data(), plan.order.size() * sizeof(int));
+        if (!plan.levelOffsets.empty()) {
+            writeExact(
+                output,
+                plan.levelOffsets.data(),
+                plan.levelOffsets.size() * sizeof(int)
+            );
+        }
+    }
+    output.close();
+    if (!output) {
+        std::cerr << "Warning: failed to flush sweep plan cache: " << tempPath << "\n";
+        return;
+    }
+    if (std::rename(tempPath.c_str(), path.c_str()) != 0) {
+        std::cerr << "Warning: cannot install sweep plan cache: " << path << "\n";
+    }
+}
+
+void printSweepPlanLevelStats(const std::vector<SweepPlan>& plans) {
+    std::size_t cyclicCount = 0;
+    std::size_t acyclicCount = 0;
+    std::size_t totalLevels = 0;
+    std::size_t totalLevelCells = 0;
+    std::size_t maxLevelWidth = 0;
+    std::size_t maxLevelDirection = 0;
+    std::size_t maxLevelCount = 0;
+
+    for (std::size_t direction = 0; direction < plans.size(); ++direction) {
+        const SweepPlan& plan = plans[direction];
+        if (plan.hasCycle) {
+            ++cyclicCount;
+            continue;
+        }
+
+        ++acyclicCount;
+        const std::size_t levelCount =
+            plan.levelOffsets.empty() ? 0 : plan.levelOffsets.size() - 1;
+        totalLevels += levelCount;
+        totalLevelCells += plan.levelCells.size();
+        maxLevelCount = std::max(maxLevelCount, levelCount);
+
+        for (std::size_t level = 0; level < levelCount; ++level) {
+            const std::size_t begin = static_cast<std::size_t>(plan.levelOffsets[level]);
+            const std::size_t end = static_cast<std::size_t>(plan.levelOffsets[level + 1]);
+            const std::size_t width = end - begin;
+            if (width > maxLevelWidth) {
+                maxLevelWidth = width;
+                maxLevelDirection = direction;
+            }
+        }
+    }
+
+    const double avgLevels = acyclicCount == 0
+        ? 0.0
+        : static_cast<double>(totalLevels) / static_cast<double>(acyclicCount);
+    const double avgLevelWidth = totalLevels == 0
+        ? 0.0
+        : static_cast<double>(totalLevelCells) / static_cast<double>(totalLevels);
+
+    std::cout << "Sweep plan levels: acyclic=" << acyclicCount
+              << ", cyclic=" << cyclicCount
+              << ", avg_levels=" << avgLevels
+              << ", max_levels=" << maxLevelCount
+              << ", avg_width=" << avgLevelWidth
+              << ", max_width=" << maxLevelWidth
+              << ", max_width_direction=" << maxLevelDirection << "\n";
+}
+
+} // namespace
 
 
 RSISolver::RSISolver(const Mesh& mesh, RSIConfig cfg)
@@ -21,6 +324,29 @@ RSISolver::RSISolver(const Mesh& mesh, RSIConfig cfg)
 
 const std::vector<SweepPlan>& RSISolver::cachedSweepPlans() const {
     if (sweepPlansCache_.empty()) {
+        const bool useCache = sweepPlanCacheEnabled();
+        const std::uint64_t cacheKey = sweepPlanCacheKey(mesh_, ordinates_, cfg_);
+        const std::string cachePath = sweepPlanCachePath(cacheKey);
+        if (useCache) {
+            const auto loadStart = std::chrono::steady_clock::now();
+            if (tryLoadSweepPlanCache(
+                    cachePath,
+                    cacheKey,
+                    ordinates_.size(),
+                    mesh_.cells.size(),
+                    sweepPlansCache_
+                )) {
+                const double seconds = std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - loadStart
+                ).count();
+                std::cout << "Sweep plans loaded: directions=" << ordinates_.size()
+                          << ", seconds=" << seconds
+                          << ", cache=" << cachePath << "\n";
+                printSweepPlanLevelStats(sweepPlansCache_);
+                return sweepPlansCache_;
+            }
+        }
+
         const auto start = std::chrono::steady_clock::now();
         sweepPlansCache_.resize(ordinates_.size());
         std::atomic<std::size_t> next{0};
@@ -56,8 +382,28 @@ const std::vector<SweepPlan>& RSISolver::cachedSweepPlans() const {
         ).count();
         std::cout << "Sweep plans built: directions=" << ordinates_.size()
                   << ", threads=" << workerCount << ", seconds=" << seconds << "\n";
+        printSweepPlanLevelStats(sweepPlansCache_);
+        if (useCache) {
+            const auto saveStart = std::chrono::steady_clock::now();
+            saveSweepPlanCache(
+                cachePath,
+                cacheKey,
+                ordinates_.size(),
+                mesh_.cells.size(),
+                sweepPlansCache_
+            );
+            const double saveSeconds = std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - saveStart
+            ).count();
+            std::cout << "Sweep plans cached: seconds=" << saveSeconds
+                      << ", cache=" << cachePath << "\n";
+        }
     }
     return sweepPlansCache_;
+}
+
+void RSISolver::printSweepPlanStats() const {
+    (void)cachedSweepPlans();
 }
      // sweep_ 是非结构网格输运扫掠器，它负责在给定方向 omega 
      //和散射源 source 的情况下，求解空间离散后的输运方程，得到 psi
@@ -414,6 +760,23 @@ double RSISolver::relativeL2(const std::vector<double>& a,
 
 // 运行一次SI，并返回 SI 收敛后的零阶矩空间场 phi0。
 std::vector<double> RSISolver::runSIField(int& convergedN) const {
+    if (cfg_.useGPU) {
+#ifdef RSI_ENABLE_CUDA
+        if (cfg_.scattering != "isotropic" || cfg_.groupCount != 1) {
+            throw std::runtime_error(
+                "CUDA SI currently supports only isotropic scattering with G=1"
+            );
+        }
+        return runSIFieldCuda(
+            mesh_, ordinates_, cachedSweepPlans(), cfg_.sourceShape,
+            cfg_.maxSIters, cfg_.siTolerance, convergedN
+        );
+#else
+        throw std::runtime_error(
+            "this executable was built without CUDA; use `make gpu` and run rsi_unstructured_gpu"
+        );
+#endif
+    }
     auto hist = runSI(convergedN);
     return hist.back();
 }
