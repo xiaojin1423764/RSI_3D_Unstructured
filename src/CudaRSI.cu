@@ -123,16 +123,6 @@ struct DeviceMeshView {
     const int* refBcType;
     const double* refBcValue;
     const double* refSourceFraction;
-    const double* faceNx;
-    const double* faceNy;
-    const double* faceNz;
-    const double* faceArea;
-    const double* faceFx;
-    const double* faceFy;
-    const double* faceFz;
-    const int* faceBcType;
-    const double* faceBcValue;
-    const double* faceSourceFraction;
 };
 
 struct DeviceMeshStorage {
@@ -154,16 +144,6 @@ struct DeviceMeshStorage {
     DeviceArray<int> refBcType;
     DeviceArray<double> refBcValue;
     DeviceArray<double> refSourceFraction;
-    DeviceArray<double> faceNx;
-    DeviceArray<double> faceNy;
-    DeviceArray<double> faceNz;
-    DeviceArray<double> faceArea;
-    DeviceArray<double> faceFx;
-    DeviceArray<double> faceFy;
-    DeviceArray<double> faceFz;
-    DeviceArray<int> faceBcType;
-    DeviceArray<double> faceBcValue;
-    DeviceArray<double> faceSourceFraction;
 
     DeviceMeshView view(int cellCount) const {
         return {
@@ -186,16 +166,6 @@ struct DeviceMeshStorage {
             refBcType.ptr,
             refBcValue.ptr,
             refSourceFraction.ptr,
-            faceNx.ptr,
-            faceNy.ptr,
-            faceNz.ptr,
-            faceArea.ptr,
-            faceFx.ptr,
-            faceFy.ptr,
-            faceFz.ptr,
-            faceBcType.ptr,
-            faceBcValue.ptr,
-            faceSourceFraction.ptr,
         };
     }
 };
@@ -211,7 +181,6 @@ int boundaryType(const std::string& type) {
 DeviceMeshStorage uploadMesh(const Mesh& mesh) {
     DeviceMeshStorage storage;
     const int C = static_cast<int>(mesh.cells.size());
-    const int F = static_cast<int>(mesh.faces.size());
 
     std::vector<double> volume(C), sigmaT(C), sigmaS(C), cellQ(C);
     std::vector<int> offsets(C + 1, 0), refFace, refNeighbor, refSign;
@@ -258,23 +227,6 @@ DeviceMeshStorage uploadMesh(const Mesh& mesh) {
     }
     offsets[C] = static_cast<int>(refFace.size());
 
-    std::vector<double> nx(F), ny(F), nz(F), area(F), fx(F), fy(F), fz(F);
-    std::vector<double> bcValue(F), sourceFraction(F);
-    std::vector<int> bcType(F);
-    for (int i = 0; i < F; ++i) {
-        const Face& face = mesh.faces[i];
-        nx[i] = face.normal.x;
-        ny[i] = face.normal.y;
-        nz[i] = face.normal.z;
-        area[i] = face.area;
-        fx[i] = face.center.x;
-        fy[i] = face.center.y;
-        fz[i] = face.center.z;
-        bcType[i] = boundaryType(face.bc_type);
-        bcValue[i] = face.bc_value;
-        sourceFraction[i] = face.source_fraction;
-    }
-
     storage.volume.copyFrom(volume);
     storage.sigmaT.copyFrom(sigmaT);
     storage.sigmaS.copyFrom(sigmaS);
@@ -293,16 +245,6 @@ DeviceMeshStorage uploadMesh(const Mesh& mesh) {
     storage.refBcType.copyFrom(refBcType);
     storage.refBcValue.copyFrom(refBcValue);
     storage.refSourceFraction.copyFrom(refSourceFraction);
-    storage.faceNx.copyFrom(nx);
-    storage.faceNy.copyFrom(ny);
-    storage.faceNz.copyFrom(nz);
-    storage.faceArea.copyFrom(area);
-    storage.faceFx.copyFrom(fx);
-    storage.faceFy.copyFrom(fy);
-    storage.faceFz.copyFrom(fz);
-    storage.faceBcType.copyFrom(bcType);
-    storage.faceBcValue.copyFrom(bcValue);
-    storage.faceSourceFraction.copyFrom(sourceFraction);
     return storage;
 }
 
