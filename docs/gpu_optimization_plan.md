@@ -585,6 +585,40 @@ SI fine 与 RSI CSV 仍与 `/tmp/rsi_fig5_30k_si_tiled_on` 逐字节一致，但
 3. 若继续改善 memory locality，优先尝试 ref/neighborhood-aware 的数据布局或重编号；
    单纯按空间 Morton 重排 level 内 cell 已验证为回归。
 
+### 下一步方案：全局重编号 / 数据布局
+
+目标不是再改同一 level 内的临时执行顺序，而是让 mesh 的全局 cell id 与邻接关系更适合
+GPU sweep 访问。当前两个排序实验说明，单纯改变 wavefront level 内顺序会破坏现有
+cell-id 局部性；下一步应把 `currentPsi[direction*C + neighbor]` 的随机邻居读作为主要目标。
+
+建议按低风险到高风险分三阶段推进：
+
+1. 离线评估重编号质量，不改求解路径。
+   - 在 CPU 端构建候选 permutation：原始 id、RCM/BFS 邻接重编号、按 cell graph partition
+     的局部 BFS、方向无关的 Hilbert/Morton 全局重编号。
+   - 对每个候选统计 `abs(newId[cell] - newId[neighbor])` 的平均值、P90/P99、同一 cache line
+     命中率估计，以及按 wavefront level 的连续 run 长度。
+   - 只输出报告，不改变 `Mesh`、CSV 输出或 CUDA kernel。
+2. 增加可开关的 GPU-only renumbered view。
+   - 保留原始 `Mesh` 和输出顺序；上传 GPU 数据时生成 `oldToNew/newToOld`。
+   - GPU `volume/sigma/ref*`、`orders`、`levelOffsets`、`currentPsi` 全部使用 new cell id。
+   - 写回 `phi` / Figure 5 CSV 前按 `newToOld` 还原到原始 cell 顺序，保证文件可逐字节比较。
+   - 增加环境开关，例如 `RSI_CUDA_CELL_RENUMBER=0|rcm|bfs|morton`，默认先关闭。
+3. 用 30k/200k 正式验证后再决定是否默认开启。
+   - 正确性：`make gpu_consistency_test`、`./gpu_consistency_test`，以及 30k/200k Figure 5
+     四个 CSV 与当前默认输出 `cmp -s`。
+   - 性能：30k、200k warm-cache wall time；200k NCU 对比 `sweepLevelTiledKernel` 的
+     duration、L2 hit、excessive sectors。
+   - 接受条件：CSV byte-identical，200k fine SI/RSI sweep 至少稳定下降，且 30k 不出现明显回归。
+
+需要同步处理的工程细节：
+
+- sweep plan cache key 必须包含 renumbering mode 和算法版本；否则旧 cache 会掩盖实验。
+- 输出、checkpoint、CPU fallback 仍以原始 cell 顺序为外部契约，避免影响现有数据文件和图脚本。
+- 若只改变 GPU upload view，CPU/GPU 对比路径需要在 GPU 结果 copy-back 后还原顺序再比较。
+- 若 renumbering 改善 NCU sector waste 但增加 plan/upload 时间，应以 warm-cache Figure 5 总时间和
+  sweep kernel 时间分别记录，避免把一次性预处理成本误判为 kernel 回归。
+
 ### 优先级 4：保留但暂不优先的方向
 
 - SI direction streaming：可降低显存和 `angularPsi[M*C]` 常驻空间，但当前
@@ -597,7 +631,6 @@ SI fine 与 RSI CSV 仍与 `/tmp/rsi_fig5_30k_si_tiled_on` 逐字节一致，但
 
 ## 推荐执行顺序
 
-1. 跑 30k/200k cache on/off 的正式输出目录对比，确认提交前没有临时 `/tmp`
-   路径依赖。
-2. 若 warm-cache wall time 仍主要在 CUDA sweep，再跑 200k NCU 并决定 mesh SoA / face-lane /
-   CUDA Graph 的优先级。
+1. 先实现“离线重编号质量统计”工具或 debug 输出，只读 mesh，不接入求解。
+2. 选出 1-2 个候选重编号后，再实现 GPU-only renumbered view，并保持默认关闭。
+3. 跑 30k/200k byte compare、warm-cache benchmark 和 200k NCU，再决定是否保留或默认开启。
