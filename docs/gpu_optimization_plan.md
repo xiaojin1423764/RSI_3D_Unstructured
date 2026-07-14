@@ -555,14 +555,35 @@ sectors `75%`。说明二次 face-array 间接访问确有收益，但剩余 unc
 `/tmp/rsi_fig5_30k_si_tiled_on` 与 `..._off` 的四个 CSV 已用 `cmp -s` 确认逐字节一致。
 因此 `RSI_CUDA_SI_TILED_WAVEFRONT` 已改为默认开启。
 
+层内 Morton/Z-order 排序实验已验证但不保留：
+
+| 网格 | wall | fine CUDA total | fine SI sweep | fine RSI sweep | 结论 |
+|---|---:|---:|---:|---:|---|
+| 30k Morton | 39.62 s | 39.302 s | 16.722 s | 21.345 s | 慢于 SI tiled on 的 38.50 s |
+| 200k Morton warm-cache | 8.45 s | 5.637 s | 2.228 s | 2.435 s | 慢于 ref-level SoA + SI tiled on 的 8.10 s / 5.264 s |
+
+Morton 排序没有改变离散结果：30k 与 `/tmp/rsi_fig5_30k_si_tiled_on`、200k 与
+`/tmp/rsi_fig5_200k_no_face_arrays` 的四个 Figure 5 CSV 均 `cmp -s` 逐字节一致。
+但它破坏了现有 mesh/cell-id 顺序下已经较好的访问局部性，因此源码已回滚，不作为后续方向。
+
+层内 upstream-neighbor-rank 排序也已验证但不保留：
+
+| 网格 | wall | fine CUDA total | fine SI sweep | fine RSI sweep | 结论 |
+|---|---:|---:|---:|---:|---|
+| 30k neighbor-rank | 57.03 s | 53.820 s | 23.857 s | 27.962 s | 明显慢于 SI tiled on 的 38.50 s |
+
+该排序按每个 cell 已完成上游邻居的 sweep rank 对同一 level 内 cell 排序，30k 的
+SI fine 与 RSI CSV 仍与 `/tmp/rsi_fig5_30k_si_tiled_on` 逐字节一致，但 kernel 时间大幅
+回归，因此未继续跑 200k，源码已回滚。
+
 下一步 GPU kernel 优化应优先考虑：
 
 1. 对 `currentPsi[direction*C + cell]` / neighbor read 做更适合 wavefront 的布局或
    cell reordering，减少非结构 neighbor 访问造成的 sector waste。
 2. 评估 SI 也使用 tiled level kernel 是否能降低 partial wave/tail effect；需要
    防止 block 数变多后 launch 内工作过碎。
-3. 若继续改善 memory locality，考虑把 level 内排序从单纯 cell id 排序改为基于
-   face/ref 邻接的局部性排序，但必须保持同一 level 内无依赖这一前提。
+3. 若继续改善 memory locality，优先尝试 ref/neighborhood-aware 的数据布局或重编号；
+   单纯按空间 Morton 重排 level 内 cell 已验证为回归。
 
 ### 优先级 4：保留但暂不优先的方向
 
