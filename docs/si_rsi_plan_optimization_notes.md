@@ -320,10 +320,46 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 - `rsi_plan`: `14.2112 s -> 0.775026 s`，约 `18.3x`。
 - 当前 RSI plan 的最大剩余项变为 cache load：`0.421822 s`。
 
+### 8. SI plan breakdown
+
+已给 streaming SI 增加 plan breakdown 输出：
+
+- `si_plan_breakdown_key`
+- `si_plan_breakdown_cache`
+- `si_plan_breakdown_build`
+- `si_plan_breakdown_save`
+- `si_plan_breakdown_assemble`
+- `si_plan_breakdown_pack`
+- `si_plan_breakdown_upload`
+- `si_plan_breakdown_sync`
+
+实测 `200k + S128 + 16 samples`：
+
+- 输出目录：`results/fig5_200k_s128_16_si_plan_breakdown/Cir/`
+- CUDA internal total：`104.618 s`
+- `si_total = 102.932 s`
+- `si_plan = 56.5946 s`
+- `si_sweep = 45.3806 s`
+- `si_plan_breakdown_key = 0.0620618 s`
+- `si_plan_breakdown_cache = 27.757 s`
+- `si_plan_breakdown_pack = 4.38478 s`
+- `si_plan_breakdown_upload = 22.1714 s`
+- `si_plan_breakdown_sync = 0.34358 s`
+- `si_plan_breakdown_build = 0`
+- `si_plan_breakdown_save = 0`
+- 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+
+结论：
+
+- SI plan 当前不再是 key 生成瓶颈。
+- 最大项是 host cache 读取/反序列化和 H2D 上传，二者合计约 `49.9 s`。
+- 下一步优先方向应是减少重复 host cache load 和 H2D upload，例如扩大/调整 device plan cache、做 SI host chunk 常驻全覆盖、或把常用 chunk 固定常驻 GPU。
+
 ## 当前推荐优先级
 
-1. 用 SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
-2. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 cache load。
-3. 将 `maxSamplesPerBatch=128` 改为环境变量，测试 `192/256`，减少 full 8192 的 batch 数。
-4. 基于 cache 命中/常驻统计自动选择预算。
-5. SI chunk size 可配置，继续测试 64/128/256。
+1. 针对 SI plan 的 cache load 和 H2D upload 做常驻/复用优化。
+2. 用 SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
+3. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 cache load。
+4. 将 `maxSamplesPerBatch=128` 改为环境变量，测试 `192/256`，减少 full 8192 的 batch 数。
+5. 基于 cache 命中/常驻统计自动选择预算。
+6. SI chunk size 可配置，继续测试 64/128/256。

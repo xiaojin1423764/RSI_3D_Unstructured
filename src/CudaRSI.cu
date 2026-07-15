@@ -2182,6 +2182,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     double siReduceSeconds = 0.0;
     double siNormSeconds = 0.0;
     double siCopySeconds = 0.0;
+    PlanChunkTiming siPlanBreakdown;
 
     {
         const auto siStart = std::chrono::steady_clock::now();
@@ -2262,6 +2263,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                     ++siDevicePlanCacheHits;
                 } else {
                     ++siDevicePlanCacheMisses;
+                    PlanChunkTiming chunkPlanTiming;
                     HostPlanChunk hostChunk;
                     if (siPrefetchFuture.valid() && siPrefetchIndex == chunkIndex) {
                         hostChunk = siPrefetchFuture.get();
@@ -2269,14 +2271,28 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                     } else {
                         hostChunk = preparePlanChunkHost(
                             mesh, ordinates, sweep, siDirectionChunks[chunkIndex],
-                            &cacheKeyContext
+                            &cacheKeyContext, &chunkPlanTiming
                         );
                     }
-                    temporaryChunk = uploadPreparedPlanChunk(std::move(hostChunk));
+                    temporaryChunk = uploadPreparedPlanChunk(
+                        std::move(hostChunk), &chunkPlanTiming
+                    );
+                    const auto planSyncStart = std::chrono::steady_clock::now();
                     checkCuda(
                         cudaDeviceSynchronize(),
                         "synchronize streaming CUDA SI plan upload"
                     );
+                    chunkPlanTiming.syncSeconds += secondsBetween(
+                        planSyncStart, std::chrono::steady_clock::now()
+                    );
+                    siPlanBreakdown.keySeconds += chunkPlanTiming.keySeconds;
+                    siPlanBreakdown.cacheSeconds += chunkPlanTiming.cacheSeconds;
+                    siPlanBreakdown.buildSeconds += chunkPlanTiming.buildSeconds;
+                    siPlanBreakdown.saveSeconds += chunkPlanTiming.saveSeconds;
+                    siPlanBreakdown.assembleSeconds += chunkPlanTiming.assembleSeconds;
+                    siPlanBreakdown.packSeconds += chunkPlanTiming.packSeconds;
+                    siPlanBreakdown.uploadSeconds += chunkPlanTiming.uploadSeconds;
+                    siPlanBreakdown.syncSeconds += chunkPlanTiming.syncSeconds;
                     const std::size_t chunkBytes =
                         estimateDevicePlanChunkBytes(*temporaryChunk, C);
                     const double planElapsed =
@@ -2757,6 +2773,16 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
               << ", si_reduce=" << siReduceSeconds
               << ", si_norm=" << siNormSeconds
               << ", si_copy=" << siCopySeconds << "\n";
+    std::cout << "CUDA streaming timing: si_plan_breakdown_key="
+              << siPlanBreakdown.keySeconds
+              << ", si_plan_breakdown_cache=" << siPlanBreakdown.cacheSeconds
+              << ", si_plan_breakdown_build=" << siPlanBreakdown.buildSeconds
+              << ", si_plan_breakdown_save=" << siPlanBreakdown.saveSeconds
+              << ", si_plan_breakdown_assemble=" << siPlanBreakdown.assembleSeconds
+              << ", si_plan_breakdown_pack=" << siPlanBreakdown.packSeconds
+              << ", si_plan_breakdown_upload=" << siPlanBreakdown.uploadSeconds
+              << ", si_plan_breakdown_sync=" << siPlanBreakdown.syncSeconds
+              << "\n";
     std::cout << "CUDA streaming timing: rsi_total=" << rsiTotalSeconds
               << ", rsi_plan=" << rsiPlanSeconds
               << ", rsi_schedule=" << rsiScheduleSeconds
