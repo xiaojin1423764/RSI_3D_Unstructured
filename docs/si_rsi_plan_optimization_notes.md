@@ -31,6 +31,7 @@
    - 默认只缓存 `K <= 256` 的 chunk，避免 RSI 大 unique-direction chunk 生成大量一次性 cache 文件。
    - 可用 `RSI_CUDA_MAX_CACHED_PLAN_CHUNK` 调整缓存方向数上限。
    - RSI 大 unique-direction chunk 会按固定 cache chunk 拆分复用；默认 `RSI_CUDA_FIXED_PLAN_CHUNK=1`，即单方向 plan cache。
+   - 已增加进程内 host LRU cache，默认 `RSI_CUDA_PLAN_HOST_CACHE_MB=1024`，可设为 `0` 关闭。
 
 5. streaming-plan 触发阈值：
    - 默认阈值为 8 GiB。
@@ -107,18 +108,23 @@ RSI_CUDA_FIXED_PLAN_CHUNK=1  # default
 
 ### 2. Host 内存 LRU cache
 
-当前 chunk cache 是磁盘缓存；每次使用仍要读取、反序列化、拷贝到 device。
+当前 chunk cache 原本是磁盘缓存；每次使用仍要读取、反序列化、拷贝到 device。
 
-建议增加 host 内存 LRU：
+已增加 host 内存 LRU：
 
 - 缓存最近使用的若干 plan chunks。
-- 以字节数限制，如 4-8 GiB。
-- SI 的 130 个 fixed chunk 可以按内存预算部分常驻。
+- 以 `RSI_CUDA_PLAN_HOST_CACHE_MB` 限制，默认 1024 MiB。
+- SI fixed chunk 和 RSI 单方向 fixed chunk 都走同一套 host cache。
 
 预期收益：
 
 - 降低 `si_plan` 中重复磁盘读取和反序列化开销。
 - 对 fixed RSI chunk 复用也有帮助。
+
+待测：
+
+- 200k/S128/16 cold/warm timing。
+- 视内存情况扫描 `RSI_CUDA_PLAN_HOST_CACHE_MB=1024/2048/4096`。
 
 ### 3. SI chunk size 参数扫描
 
@@ -186,7 +192,7 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 ## 当前推荐优先级
 
 1. 固定方向 chunk 复用，先解决 `rsi_plan`。
-2. Host LRU cache，降低 SI/RSI 反复读取 chunk cache 的成本。
+2. 扫描 host cache 预算，确认 SI/RSI 反复读取 chunk cache 的收益。
 3. SI chunk size 可配置，测试 256/512。
 4. Device chunk pool。
 5. 磁盘 cache 压缩。

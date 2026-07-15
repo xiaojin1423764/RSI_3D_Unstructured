@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <random>
@@ -20,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -676,6 +678,96 @@ bool sweepPlanChunkCacheEnabled() {
     return !value || std::atoi(value) != 0;
 }
 
+std::size_t sweepPlanBytes(const SweepPlan& plan) {
+    return plan.order.size() * sizeof(int) +
+           plan.levelOffsets.size() * sizeof(int) +
+           sizeof(SweepPlan);
+}
+
+std::size_t sweepPlansBytes(const std::vector<SweepPlan>& plans) {
+    std::size_t bytes = sizeof(std::vector<SweepPlan>);
+    for (const SweepPlan& plan : plans) bytes += sweepPlanBytes(plan);
+    return bytes;
+}
+
+std::size_t sweepPlanHostCacheBudgetBytes() {
+    const char* value = std::getenv("RSI_CUDA_PLAN_HOST_CACHE_MB");
+    const long mb = value ? std::atol(value) : 1024;
+    if (mb <= 0) return 0;
+    constexpr long maxMb = 65536;
+    return static_cast<std::size_t>(std::min(mb, maxMb)) * 1024ull * 1024ull;
+}
+
+struct HostPlanChunkCacheEntry {
+    std::vector<SweepPlan> plans;
+    std::size_t bytes = 0;
+    std::list<std::uint64_t>::iterator lruIt;
+};
+
+struct HostPlanChunkCache {
+    std::mutex mutex;
+    std::size_t bytes = 0;
+    std::list<std::uint64_t> lru;
+    std::unordered_map<std::uint64_t, HostPlanChunkCacheEntry> entries;
+};
+
+HostPlanChunkCache& hostPlanChunkCache() {
+    static HostPlanChunkCache cache;
+    return cache;
+}
+
+bool loadHostPlanChunkCache(
+    std::uint64_t key,
+    std::size_t directionCount,
+    std::size_t cellCount,
+    std::vector<SweepPlan>& plans
+) {
+    if (sweepPlanHostCacheBudgetBytes() == 0) return false;
+    HostPlanChunkCache& cache = hostPlanChunkCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    auto found = cache.entries.find(key);
+    if (found == cache.entries.end()) return false;
+    const std::vector<SweepPlan>& cachedPlans = found->second.plans;
+    if (cachedPlans.size() != directionCount) return false;
+    for (const SweepPlan& plan : cachedPlans) {
+        if (plan.order.size() != cellCount) return false;
+    }
+    cache.lru.splice(cache.lru.begin(), cache.lru, found->second.lruIt);
+    found->second.lruIt = cache.lru.begin();
+    plans = cachedPlans;
+    return true;
+}
+
+void storeHostPlanChunkCache(std::uint64_t key, const std::vector<SweepPlan>& plans) {
+    const std::size_t budget = sweepPlanHostCacheBudgetBytes();
+    if (budget == 0) return;
+    const std::size_t bytes = sweepPlansBytes(plans);
+    if (bytes > budget) return;
+    HostPlanChunkCache& cache = hostPlanChunkCache();
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    auto existing = cache.entries.find(key);
+    if (existing != cache.entries.end()) {
+        cache.bytes -= existing->second.bytes;
+        cache.lru.erase(existing->second.lruIt);
+        cache.entries.erase(existing);
+    }
+    cache.lru.push_front(key);
+    HostPlanChunkCacheEntry entry;
+    entry.plans = plans;
+    entry.bytes = bytes;
+    entry.lruIt = cache.lru.begin();
+    cache.bytes += bytes;
+    cache.entries.emplace(key, std::move(entry));
+    while (cache.bytes > budget && !cache.lru.empty()) {
+        const std::uint64_t victim = cache.lru.back();
+        auto victimIt = cache.entries.find(victim);
+        cache.lru.pop_back();
+        if (victimIt == cache.entries.end()) continue;
+        cache.bytes -= victimIt->second.bytes;
+        cache.entries.erase(victimIt);
+    }
+}
+
 std::string sweepPlanChunkCachePath(std::uint64_t key) {
     std::ostringstream name;
     const char* dir = std::getenv("RSI_SWEEP_PLAN_CACHE_DIR");
@@ -814,7 +906,11 @@ bool tryLoadSweepPlanChunkCache(
     std::vector<SweepPlan>& plans
 ) {
     try {
-        return loadSweepPlanChunkCache(path, key, directionCount, cellCount, plans);
+        if (loadHostPlanChunkCache(key, directionCount, cellCount, plans)) return true;
+        const bool loaded =
+            loadSweepPlanChunkCache(path, key, directionCount, cellCount, plans);
+        if (loaded) storeHostPlanChunkCache(key, plans);
+        return loaded;
     } catch (const std::exception& e) {
         plans.clear();
         std::cerr << "Warning: ignoring sweep plan chunk cache " << path
@@ -881,6 +977,7 @@ void saveSweepPlanChunkCache(
     if (std::rename(tempPath.c_str(), path.c_str()) != 0) {
         std::cerr << "Warning: cannot install sweep plan chunk cache: " << path << "\n";
     }
+    storeHostPlanChunkCache(key, plans);
 }
 
 int sameCycleRunEnd(
