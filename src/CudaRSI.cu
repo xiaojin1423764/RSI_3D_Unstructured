@@ -840,7 +840,24 @@ struct PlanChunkTiming {
     double packSeconds = 0.0;
     double uploadSeconds = 0.0;
     double syncSeconds = 0.0;
+    std::size_t fixedCacheChunks = 0;
+    std::size_t fixedCacheHits = 0;
+    std::size_t fixedCacheMisses = 0;
 };
+
+void accumulatePlanChunkTiming(PlanChunkTiming& total, const PlanChunkTiming& step) {
+    total.keySeconds += step.keySeconds;
+    total.cacheSeconds += step.cacheSeconds;
+    total.buildSeconds += step.buildSeconds;
+    total.saveSeconds += step.saveSeconds;
+    total.assembleSeconds += step.assembleSeconds;
+    total.packSeconds += step.packSeconds;
+    total.uploadSeconds += step.uploadSeconds;
+    total.syncSeconds += step.syncSeconds;
+    total.fixedCacheChunks += step.fixedCacheChunks;
+    total.fixedCacheHits += step.fixedCacheHits;
+    total.fixedCacheMisses += step.fixedCacheMisses;
+}
 
 std::size_t hostPlanChunkBytes(const HostPlanChunk& chunk) {
     return sizeof(HostPlanChunk) +
@@ -864,6 +881,20 @@ std::size_t estimateDevicePlanChunkBytes(const HostPlanChunk& chunk, int cellCou
     bytes += K * (3 * sizeof(double) + sizeof(double));
     bytes += K * (sizeof(unsigned char) + 3 * sizeof(int));
     bytes += static_cast<std::size_t>(chunk.maxSweepLevelCount + 1) * K * sizeof(int);
+    return bytes;
+}
+
+std::size_t estimateDevicePlanChunkBytesForDirections(
+    std::size_t directionCount,
+    int cellCount,
+    int maxSweepLevelCount
+) {
+    const std::size_t C = static_cast<std::size_t>(cellCount);
+    std::size_t bytes = directionCount * C * sizeof(int);
+    bytes += directionCount * (4 * sizeof(double));
+    bytes += directionCount * (sizeof(unsigned char) + 3 * sizeof(int));
+    bytes += static_cast<std::size_t>(maxSweepLevelCount + 1) *
+             directionCount * sizeof(int);
     return bytes;
 }
 
@@ -1422,7 +1453,8 @@ HostPlanChunk preparePlanChunkHost(
     const TransportSweep& sweep,
     const std::vector<int>& globalDirections,
     SweepPlanChunkCacheKeyContext* cacheKeyContext = nullptr,
-    PlanChunkTiming* timing = nullptr
+    PlanChunkTiming* timing = nullptr,
+    bool allowFixedChunkReuse = true
 ) {
     HostPlanChunk host;
     const int C = static_cast<int>(mesh.cells.size());
@@ -1464,6 +1496,7 @@ HostPlanChunk preparePlanChunkHost(
     }
     if (!loadedFromCache) {
         const bool useFixedChunkReuse =
+            allowFixedChunkReuse &&
             sweepPlanChunkCacheEnabled() &&
             envFlagEnabled("RSI_CUDA_FIXED_PLAN_CHUNK_REUSE", true) &&
             K > maxCachedChunkDirections;
@@ -1506,6 +1539,14 @@ HostPlanChunk preparePlanChunkHost(
                 bool fixedLoaded = tryLoadSweepPlanChunkCache(
                     fixedPath, fixedKey, fixedDirections.size(), mesh.cells.size(), fixedPlans
                 );
+                if (timing) {
+                    ++timing->fixedCacheChunks;
+                    if (fixedLoaded) {
+                        ++timing->fixedCacheHits;
+                    } else {
+                        ++timing->fixedCacheMisses;
+                    }
+                }
                 if (timing) {
                     timing->cacheSeconds += secondsBetween(
                         cacheStart, std::chrono::steady_clock::now()
@@ -1698,10 +1739,12 @@ std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
     const TransportSweep& sweep,
     const std::vector<int>& globalDirections,
     SweepPlanChunkCacheKeyContext* cacheKeyContext = nullptr,
-    PlanChunkTiming* timing = nullptr
+    PlanChunkTiming* timing = nullptr,
+    bool allowFixedChunkReuse = true
 ) {
     HostPlanChunk host = preparePlanChunkHost(
-        mesh, ordinates, sweep, globalDirections, cacheKeyContext, timing
+        mesh, ordinates, sweep, globalDirections, cacheKeyContext, timing,
+        allowFixedChunkReuse
     );
     std::unique_ptr<DevicePlanChunk> chunk = uploadPreparedPlanChunk(
         std::move(host), timing
@@ -2624,14 +2667,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                     chunkPlanTiming.syncSeconds += secondsBetween(
                         planSyncStart, std::chrono::steady_clock::now()
                     );
-                    siPlanBreakdown.keySeconds += chunkPlanTiming.keySeconds;
-                    siPlanBreakdown.cacheSeconds += chunkPlanTiming.cacheSeconds;
-                    siPlanBreakdown.buildSeconds += chunkPlanTiming.buildSeconds;
-                    siPlanBreakdown.saveSeconds += chunkPlanTiming.saveSeconds;
-                    siPlanBreakdown.assembleSeconds += chunkPlanTiming.assembleSeconds;
-                    siPlanBreakdown.packSeconds += chunkPlanTiming.packSeconds;
-                    siPlanBreakdown.uploadSeconds += chunkPlanTiming.uploadSeconds;
-                    siPlanBreakdown.syncSeconds += chunkPlanTiming.syncSeconds;
+                    accumulatePlanChunkTiming(siPlanBreakdown, chunkPlanTiming);
                     const double planAdmissionScore =
                         preUploadAdmissionScore +
                         chunkPlanTiming.uploadSeconds +
@@ -2919,6 +2955,70 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     const bool useRSIWavefront = envFlagEnabled("RSI_CUDA_RSI_WAVEFRONT", true);
     const bool useRSITiledWavefront =
         envFlagEnabled("RSI_CUDA_RSI_TILED_WAVEFRONT", true);
+    const bool useRSISuperPlan =
+        envFlagEnabled("RSI_CUDA_RSI_SUPER_PLAN", false) &&
+        sampleCount > batchCapacity;
+    const std::size_t rsiSuperPlanBudget =
+        static_cast<std::size_t>(
+            envIntValue("RSI_CUDA_RSI_SUPER_PLAN_MB", 12000, 0, 15000)
+        ) * 1024ull * 1024ull;
+    std::unique_ptr<DevicePlanChunk> rsiSuperPlan;
+    std::vector<int> rsiSuperGlobalToLocal(M, -1);
+    std::size_t rsiSuperPlanDirectionCount = 0;
+    if (useRSISuperPlan && rsiSuperPlanBudget > 0) {
+        const auto uniqueStart = std::chrono::steady_clock::now();
+        std::vector<int> rsiSuperDirections = schedule;
+        std::sort(rsiSuperDirections.begin(), rsiSuperDirections.end());
+        rsiSuperDirections.erase(
+            std::unique(rsiSuperDirections.begin(), rsiSuperDirections.end()),
+            rsiSuperDirections.end()
+        );
+        rsiUniqueSeconds += secondsBetween(uniqueStart, std::chrono::steady_clock::now());
+        const std::size_t estimatedBytes = estimateDevicePlanChunkBytesForDirections(
+            rsiSuperDirections.size(), C, staticProblem->directionCount
+        );
+        std::size_t postWorkspaceFreeBytes = 0;
+        std::size_t postWorkspaceTotalBytes = 0;
+        checkCuda(
+            cudaMemGetInfo(&postWorkspaceFreeBytes, &postWorkspaceTotalBytes),
+            "streaming cudaMemGetInfo before RSI super plan"
+        );
+        const std::size_t memoryLimit =
+            std::min<std::size_t>(
+                rsiSuperPlanBudget,
+                static_cast<std::size_t>(postWorkspaceFreeBytes * 0.90)
+            );
+        if (estimatedBytes <= memoryLimit) {
+            const auto planStart = std::chrono::steady_clock::now();
+            PlanChunkTiming superPlanTiming;
+            rsiSuperPlan = uploadPlanChunk(
+                mesh, ordinates, sweep, rsiSuperDirections,
+                &cacheKeyContext, &superPlanTiming, false
+            );
+            const auto planSyncStart = std::chrono::steady_clock::now();
+            checkCuda(
+                cudaDeviceSynchronize(),
+                "synchronize streaming CUDA RSI super plan upload"
+            );
+            superPlanTiming.syncSeconds += secondsBetween(
+                planSyncStart, std::chrono::steady_clock::now()
+            );
+            accumulatePlanChunkTiming(rsiPlanBreakdown, superPlanTiming);
+            rsiPlanSeconds += secondsBetween(planStart, std::chrono::steady_clock::now());
+            for (int local = 0; local < static_cast<int>(rsiSuperDirections.size()); ++local) {
+                rsiSuperGlobalToLocal[rsiSuperDirections[local]] = local;
+            }
+            rsiSuperPlanDirectionCount = rsiSuperDirections.size();
+            std::cerr << "CUDA streaming RSI super plan: directions="
+                      << rsiSuperPlanDirectionCount
+                      << ", estimated_bytes=" << estimatedBytes << "\n";
+        } else {
+            std::cerr << "CUDA streaming RSI super plan skipped: directions="
+                      << rsiSuperDirections.size()
+                      << ", estimated_bytes=" << estimatedBytes
+                      << ", limit=" << memoryLimit << "\n";
+        }
+    }
 
     for (int batchStart = 0; batchStart < sampleCount; batchStart += batchCapacity) {
         const int batchSize = std::min(batchCapacity, sampleCount - batchStart);
@@ -2941,30 +3041,29 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
             uniqueDirections.end()
         );
         rsiUniqueSeconds += secondsBetween(uniqueStart, std::chrono::steady_clock::now());
-        const auto planStart = std::chrono::steady_clock::now();
-        PlanChunkTiming batchPlanTiming;
-        std::unique_ptr<DevicePlanChunk> chunk =
-            uploadPlanChunk(
+        std::unique_ptr<DevicePlanChunk> batchChunk;
+        DevicePlanChunk* chunk = rsiSuperPlan ? rsiSuperPlan.get() : nullptr;
+        if (!chunk) {
+            const auto planStart = std::chrono::steady_clock::now();
+            PlanChunkTiming batchPlanTiming;
+            batchChunk = uploadPlanChunk(
                 mesh, ordinates, sweep, uniqueDirections,
                 &cacheKeyContext, &batchPlanTiming
             );
-        const auto planSyncStart = std::chrono::steady_clock::now();
-        checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA RSI plan upload");
-        batchPlanTiming.syncSeconds += secondsBetween(
-            planSyncStart, std::chrono::steady_clock::now()
-        );
-        rsiPlanBreakdown.cacheSeconds += batchPlanTiming.cacheSeconds;
-        rsiPlanBreakdown.keySeconds += batchPlanTiming.keySeconds;
-        rsiPlanBreakdown.buildSeconds += batchPlanTiming.buildSeconds;
-        rsiPlanBreakdown.saveSeconds += batchPlanTiming.saveSeconds;
-        rsiPlanBreakdown.assembleSeconds += batchPlanTiming.assembleSeconds;
-        rsiPlanBreakdown.packSeconds += batchPlanTiming.packSeconds;
-        rsiPlanBreakdown.uploadSeconds += batchPlanTiming.uploadSeconds;
-        rsiPlanBreakdown.syncSeconds += batchPlanTiming.syncSeconds;
-        rsiPlanSeconds += secondsBetween(planStart, std::chrono::steady_clock::now());
+            chunk = batchChunk.get();
+            const auto planSyncStart = std::chrono::steady_clock::now();
+            checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA RSI plan upload");
+            batchPlanTiming.syncSeconds += secondsBetween(
+                planSyncStart, std::chrono::steady_clock::now()
+            );
+            accumulatePlanChunkTiming(rsiPlanBreakdown, batchPlanTiming);
+            rsiPlanSeconds += secondsBetween(planStart, std::chrono::steady_clock::now());
+        }
 
-        for (int local = 0; local < static_cast<int>(uniqueDirections.size()); ++local) {
-            globalToLocal[uniqueDirections[local]] = local;
+        if (!rsiSuperPlan) {
+            for (int local = 0; local < static_cast<int>(uniqueDirections.size()); ++local) {
+                globalToLocal[uniqueDirections[local]] = local;
+            }
         }
         std::fill(batchIterationHasCycle.begin(), batchIterationHasCycle.end(), 0);
         std::fill(batchIterationMaxLevel.begin(), batchIterationMaxLevel.end(), 0);
@@ -2973,7 +3072,12 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                 const int globalDirection =
                     schedule[static_cast<std::size_t>(batchStart + localSample) * iterationCount +
                              iteration];
-                const int localDirection = globalToLocal[globalDirection];
+                const int localDirection = rsiSuperPlan
+                    ? rsiSuperGlobalToLocal[globalDirection]
+                    : globalToLocal[globalDirection];
+                if (localDirection < 0) {
+                    throw std::runtime_error("CUDA RSI plan direction mapping failed");
+                }
                 batchDirections[static_cast<std::size_t>(iteration) * batchSize + localSample] =
                     localDirection;
                 if (chunk->hostHasCycle[localDirection] != 0) {
@@ -2985,7 +3089,9 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                 );
             }
         }
-        for (int globalDirection : uniqueDirections) globalToLocal[globalDirection] = -1;
+        if (!rsiSuperPlan) {
+            for (int globalDirection : uniqueDirections) globalToLocal[globalDirection] = -1;
+        }
 
         const auto directionCopyStart = std::chrono::steady_clock::now();
         checkCuda(cudaMemcpy(selectedDirections.ptr, batchDirections.data(),
@@ -3158,6 +3264,9 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
               << ", si_plan_breakdown_pack=" << siPlanBreakdown.packSeconds
               << ", si_plan_breakdown_upload=" << siPlanBreakdown.uploadSeconds
               << ", si_plan_breakdown_sync=" << siPlanBreakdown.syncSeconds
+              << ", si_plan_fixed_cache_chunks=" << siPlanBreakdown.fixedCacheChunks
+              << ", si_plan_fixed_cache_hits=" << siPlanBreakdown.fixedCacheHits
+              << ", si_plan_fixed_cache_misses=" << siPlanBreakdown.fixedCacheMisses
               << "\n";
     std::cout << "CUDA streaming timing: rsi_total=" << rsiTotalSeconds
               << ", rsi_plan=" << rsiPlanSeconds
@@ -3177,6 +3286,9 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
               << ", rsi_plan_breakdown_pack=" << rsiPlanBreakdown.packSeconds
               << ", rsi_plan_breakdown_upload=" << rsiPlanBreakdown.uploadSeconds
               << ", rsi_plan_breakdown_sync=" << rsiPlanBreakdown.syncSeconds
+              << ", rsi_plan_fixed_cache_chunks=" << rsiPlanBreakdown.fixedCacheChunks
+              << ", rsi_plan_fixed_cache_hits=" << rsiPlanBreakdown.fixedCacheHits
+              << ", rsi_plan_fixed_cache_misses=" << rsiPlanBreakdown.fixedCacheMisses
               << "\n";
     std::cout << "CUDA streaming Figure 5 complete: cells=" << C
               << ", directions=" << M

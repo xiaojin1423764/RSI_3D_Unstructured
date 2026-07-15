@@ -441,7 +441,66 @@ SI packed host plan cache 实测：
 - 结论：pinned+async 把大部分 H2D 等待从 `upload` 迁到 stream sync，但 `si_plan` 仍比 async pageable 低约 `2.4 s`，比 temporary buffer reuse run 低约 `7.6 s`；先保留为 opt-in，后续需要在完整 `8192 samples` 上确认端到端收益和稳定性。
 - 压缩 `orders` 对磁盘 cache 可能有帮助，但 200k cell 无法用 `uint16`，GPU 端压缩还需要解码 kernel，风险较高，暂只记录。
 
-### 9. SI sweep breakdown
+### 9. RSI plan reuse and cache
+
+`200k + S128 + 1024 samples` 暴露的新瓶颈：
+
+- CUDA internal total：`283.002 s`
+- `si_total = 67.6201 s`
+- `rsi_total = 215.194 s`
+- `rsi_plan = 209.44 s`
+- `rsi_plan_breakdown_build = 169.148 s`
+- `rsi_plan_breakdown_cache = 21.4897 s`
+- `rsi_sweep = 5.35741 s`
+
+已实现一个 opt-in RSI super-plan 实验：
+
+```text
+RSI_CUDA_RSI_SUPER_PLAN=1
+RSI_CUDA_RSI_SUPER_PLAN_MB=12000
+```
+
+该路径会先统计整个 RSI run 实际用到的 unique directions，预算允许时一次性 build/upload 一个大 `DevicePlanChunk`，batch 内只映射 global direction 到 super-plan local index。为了避免退化成上万个 fixed chunk 查询，super-plan build 会绕过 `RSI_CUDA_FIXED_PLAN_CHUNK_REUSE`。
+
+实测结论：
+
+- `200k + S128 + 256 samples`，super-plan enabled：
+  - 输出目录：`results/fig5_200k_s128_256_rsi_superplan/Cir/`
+  - super-plan directions：`5105`
+  - estimated device bytes：`4307930825`
+  - total：`105.987 s`
+  - `rsi_plan = 37.6329 s`
+  - `rsi_plan_breakdown_build = 34.3069 s`
+- 同配置 super-plan disabled：
+  - 输出目录：`results/fig5_200k_s128_256_no_rsi_superplan/Cir/`
+  - total：`77.2234 s`
+  - `rsi_plan = 10.3915 s`
+  - `rsi_plan_breakdown_cache = 7.00688 s`
+  - `rsi_plan_breakdown_build = 0`
+- 结论：super-plan 在当前 warm fixed-cache 条件下更慢，不能默认开启；保留为实验开关，只适合 cache cold 且重复 build 严重的情形。
+
+已增加 fixed chunk cache 诊断字段：
+
+```text
+rsi_plan_fixed_cache_chunks
+rsi_plan_fixed_cache_hits
+rsi_plan_fixed_cache_misses
+```
+
+`200k + S128 + 256 samples`，默认 no super-plan，warm cache：
+
+- 输出目录：`results/fig5_200k_s128_256_rsi_cache_counters/Cir/`
+- total：`79.0945 s`
+- `rsi_plan = 11.9356 s`
+- `rsi_plan_breakdown_cache = 6.27443 s`
+- `rsi_plan_breakdown_build = 0`
+- `rsi_plan_fixed_cache_chunks = 5582`
+- `rsi_plan_fixed_cache_hits = 5582`
+- `rsi_plan_fixed_cache_misses = 0`
+
+这说明第 2 个瓶颈已从 build 转为 thousands of tiny fixed chunk cache loads/copies。`RSI_CUDA_PLAN_HOST_CACHE_MB=8192` 的对照 run 被系统 kill，说明 8 GiB host sweep-plan cache 太激进，不能作为默认。下一步更合理的是做中等粒度 fixed chunk（例如 16/32/64 directions）或 shard prewarm，而不是简单增大 host cache。
+
+### 10. SI sweep breakdown
 
 已增加 opt-in sweep 细分开关：
 
@@ -471,7 +530,7 @@ RSI_CUDA_SI_SWEEP_BREAKDOWN=1
 - chunk 末尾同步几乎可以忽略。
 - 下一步若优化 sweep，应看 `sweepLevelTiledKernel` 的访存/并行度/level 调度，而不是 clear/reduce。
 
-### 10. SI fused wavefront kernel
+### 11. SI fused wavefront kernel
 
 已增加 streaming SI fused wavefront 路径：
 
