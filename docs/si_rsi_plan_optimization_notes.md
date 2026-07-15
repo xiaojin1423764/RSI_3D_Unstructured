@@ -41,6 +41,11 @@
    - 默认 `RSI_CUDA_SI_PLAN_CHUNK=128`。
    - 可用环境变量覆盖。已测试 512 在 200k/S128 上更慢，因此暂不作为默认值。
 
+7. SI device plan cache：
+   - streaming SI 阶段可把一部分已上传的 `DevicePlanChunk` 常驻 GPU。
+   - 默认 `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=8192`。
+   - 可设为 `0` 关闭，或设为 `4096` 降低显存占用。
+
 ## 已验证结果
 
 `30k + S40 + 128 samples`：
@@ -59,6 +64,22 @@
 - streaming-plan 路径完整跑通。
 - 4 个 CSV 均为 `194315` 行。
 - `phi0` 非有限值数量为 0。
+- host cache warm，未启用 SI device plan cache：
+  - wall time `314.14 s`
+  - CUDA internal total `335.934 s`
+  - `si_plan = 276.538 s`
+  - `si_sweep = 39.6823 s`
+- SI device plan cache 4096 MiB：
+  - wall time `197.18 s`
+  - CUDA internal total `210.049 s`
+  - `si_plan = 150.505 s`
+  - `si_sweep = 39.6486 s`
+- SI device plan cache 8192 MiB：
+  - wall time `143.34 s`
+  - CUDA internal total `153.483 s`
+  - `si_plan = 90.1124 s`
+  - `si_sweep = 42.9842 s`
+  - 峰值显存约 `13.4 GiB / 16.3 GiB`
 
 `200k + S128 + 8192 samples`：
 
@@ -104,7 +125,7 @@ RSI_CUDA_FIXED_PLAN_CHUNK=1  # default
 验证状态：
 
 - `make test-gpu` 已通过。
-- 200k/S128 小样本性能实测待 GPU 空闲后补充。
+- 200k/S128/16 已通过输出行数和非有限值检查。
 
 ### 2. Host 内存 LRU cache
 
@@ -121,10 +142,10 @@ RSI_CUDA_FIXED_PLAN_CHUNK=1  # default
 - 降低 `si_plan` 中重复磁盘读取和反序列化开销。
 - 对 fixed RSI chunk 复用也有帮助。
 
-待测：
+实测结论：
 
-- 200k/S128/16 cold/warm timing。
-- 视内存情况扫描 `RSI_CUDA_PLAN_HOST_CACHE_MB=1024/2048/4096`。
+- host LRU 对 200k/S128/16 warm run 有收益，但 SI 顺序扫描 chunk 数量远大于默认 1 GiB host cache 容量，单靠 host LRU 不能解决 `si_plan`。
+- SI device plan cache 的收益更直接。
 
 ### 3. SI chunk size 参数扫描
 
@@ -179,20 +200,26 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 
 在显存允许时，保留多个 chunk 的 device plan，避免每轮重复 H2D 上传。
 
-建议先做：
+已先对 SI streaming 实现：
 
 - 固定 chunk size。
 - 显存预算控制。
-- LRU 或 round-robin device chunk pool。
+- 按 chunk index 固定常驻，避免普通 LRU 在顺序扫描下失效。
 
-预期收益：
+实测收益：
 
-- 降低 SI 和 RSI 的 repeated upload 成本。
+- `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=4096` 将 200k/S128/16 的 `si_plan` 降到 `150.505 s`。
+- `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=8192` 将 200k/S128/16 的 `si_plan` 降到 `90.1124 s`。
+
+后续可做：
+
+- 对 RSI fixed-direction chunk 也增加 device 常驻窗口。
+- 输出实际 cached chunk 数和 cache bytes，便于自动调参。
 
 ## 当前推荐优先级
 
-1. 固定方向 chunk 复用，先解决 `rsi_plan`。
-2. 扫描 host cache 预算，确认 SI/RSI 反复读取 chunk cache 的收益。
-3. SI chunk size 可配置，测试 256/512。
-4. Device chunk pool。
+1. 用 SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
+2. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 `rsi_plan`。
+3. 输出 cache 命中/常驻统计，便于后续自动选择预算。
+4. SI chunk size 可配置，继续测试 64/128/256。
 5. 磁盘 cache 压缩。

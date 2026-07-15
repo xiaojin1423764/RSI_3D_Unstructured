@@ -1301,6 +1301,16 @@ std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
     return chunk;
 }
 
+std::size_t estimateDevicePlanChunkBytes(const DevicePlanChunk& chunk, int cellCount) {
+    const std::size_t K = static_cast<std::size_t>(chunk.directionCount);
+    const std::size_t C = static_cast<std::size_t>(cellCount);
+    std::size_t bytes = K * C * sizeof(int);
+    bytes += K * (3 * sizeof(double) + sizeof(double));
+    bytes += K * (sizeof(unsigned char) + 3 * sizeof(int));
+    bytes += static_cast<std::size_t>(chunk.maxSweepLevelCount + 1) * K * sizeof(int);
+    return bytes;
+}
+
 constexpr std::uint64_t siCheckpointMagic = 0x5253495349435031ULL;
 constexpr std::uint64_t rsiCheckpointMagic = 0x5253495253494350ULL;
 
@@ -2009,6 +2019,25 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         const auto siStart = std::chrono::steady_clock::now();
         const std::size_t angularValueCount =
             static_cast<std::size_t>(siDirectionsPerChunk) * C;
+        std::vector<std::vector<int>> siDirectionChunks;
+        for (int directionStart = 0; directionStart < M;
+             directionStart += siDirectionsPerChunk) {
+            const int directionEnd = std::min(directionStart + siDirectionsPerChunk, M);
+            std::vector<int> globalDirections;
+            globalDirections.reserve(directionEnd - directionStart);
+            for (int direction = directionStart; direction < directionEnd; ++direction) {
+                globalDirections.push_back(direction);
+            }
+            siDirectionChunks.push_back(std::move(globalDirections));
+        }
+        const std::size_t siDevicePlanCacheBudget =
+            static_cast<std::size_t>(
+                envIntValue("RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB", 8192, 0, 14000)
+            ) * 1024ull * 1024ull;
+        std::size_t siDevicePlanCacheBytes = 0;
+        std::vector<std::unique_ptr<DevicePlanChunk>> siDevicePlanCache(
+            siDirectionChunks.size()
+        );
         DeviceArray<double> angularPsi, phiA, phiB, normValues;
         angularPsi.allocate(angularValueCount);
         phiA.allocate(C);
@@ -2028,19 +2057,29 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                       "clear streaming CUDA SI scalar field");
             siClearSeconds += gpuTimer.stop("time streaming CUDA SI scalar clear");
 
-            for (int directionStart = 0; directionStart < M;
-                 directionStart += siDirectionsPerChunk) {
-                const int directionEnd = std::min(directionStart + siDirectionsPerChunk, M);
-                std::vector<int> globalDirections;
-                globalDirections.reserve(directionEnd - directionStart);
-                for (int direction = directionStart; direction < directionEnd; ++direction) {
-                    globalDirections.push_back(direction);
-                }
-
+            for (std::size_t chunkIndex = 0; chunkIndex < siDirectionChunks.size();
+                 ++chunkIndex) {
                 const auto planStart = std::chrono::steady_clock::now();
-                std::unique_ptr<DevicePlanChunk> chunk =
-                    uploadPlanChunk(mesh, ordinates, sweep, globalDirections);
-                checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA SI plan upload");
+                std::unique_ptr<DevicePlanChunk> temporaryChunk;
+                DevicePlanChunk* chunk = siDevicePlanCache[chunkIndex].get();
+                if (!chunk) {
+                    temporaryChunk =
+                        uploadPlanChunk(mesh, ordinates, sweep, siDirectionChunks[chunkIndex]);
+                    checkCuda(
+                        cudaDeviceSynchronize(),
+                        "synchronize streaming CUDA SI plan upload"
+                    );
+                    const std::size_t chunkBytes =
+                        estimateDevicePlanChunkBytes(*temporaryChunk, C);
+                    if (siDevicePlanCacheBudget > 0 &&
+                        siDevicePlanCacheBytes + chunkBytes <= siDevicePlanCacheBudget) {
+                        siDevicePlanCacheBytes += chunkBytes;
+                        siDevicePlanCache[chunkIndex] = std::move(temporaryChunk);
+                        chunk = siDevicePlanCache[chunkIndex].get();
+                    } else {
+                        chunk = temporaryChunk.get();
+                    }
+                }
                 siPlanSeconds += secondsBetween(planStart, std::chrono::steady_clock::now());
 
                 const int K = chunk->directionCount;
