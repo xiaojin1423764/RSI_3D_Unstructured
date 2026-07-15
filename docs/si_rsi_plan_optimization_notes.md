@@ -485,6 +485,7 @@ RSI_CUDA_RSI_SUPER_PLAN_MB=12000
 rsi_plan_fixed_cache_chunks
 rsi_plan_fixed_cache_hits
 rsi_plan_fixed_cache_misses
+rsi_plan_fixed_cache_wall
 ```
 
 `200k + S128 + 256 samples`，默认 no super-plan，warm cache：
@@ -498,7 +499,47 @@ rsi_plan_fixed_cache_misses
 - `rsi_plan_fixed_cache_hits = 5582`
 - `rsi_plan_fixed_cache_misses = 0`
 
-这说明第 2 个瓶颈已从 build 转为 thousands of tiny fixed chunk cache loads/copies。`RSI_CUDA_PLAN_HOST_CACHE_MB=8192` 的对照 run 被系统 kill，说明 8 GiB host sweep-plan cache 太激进，不能作为默认。下一步更合理的是做中等粒度 fixed chunk（例如 16/32/64 directions）或 shard prewarm，而不是简单增大 host cache。
+这说明第 2 个瓶颈已从 build 转为 thousands of tiny fixed chunk cache loads/copies。`RSI_CUDA_PLAN_HOST_CACHE_MB=8192` 的对照 run 被系统 kill，说明 8 GiB host sweep-plan cache 太激进，不能作为默认。
+
+已实现 fixed chunk cache 并行加载，默认开启：
+
+```text
+RSI_CUDA_FIXED_PLAN_PARALLEL_LOAD=1
+RSI_CUDA_FIXED_PLAN_LOAD_WORKERS=16
+```
+
+设计取舍：
+
+- 继续使用 `RSI_CUDA_FIXED_PLAN_CHUNK=1` 的单方向 cache 文件，避免中等粒度 chunk 在随机方向下加载/构建大量未使用方向。
+- 先收集当前 batch 需要的 fixed chunks，再用 worker 线程并行 `tryLoadSweepPlanChunkCache/build/save/assemble`。
+- `rsi_plan_breakdown_cache` 在并行路径下是 worker 累计时间，可能大于 wall time；看端到端应以 `rsi_plan` 和 `rsi_plan_fixed_cache_wall` 为准。
+
+实测：
+
+- `200k + S128 + 256 samples`，parallel fixed load：
+  - 输出目录：`results/fig5_200k_s128_256_parallel_fixed_load/Cir/`
+  - total：`70.512 s`
+  - `rsi_plan = 5.42786 s`
+  - `rsi_plan_fixed_cache_chunks = 5582`
+  - `rsi_plan_fixed_cache_hits = 5582`
+  - `rsi_plan_fixed_cache_misses = 0`
+  - 对比上一版 no-super warm cache：total `79.0945 s -> 70.512 s`，`rsi_plan 11.9356 s -> 5.42786 s`。
+- `200k + S128 + 1024 samples`，parallel fixed load：
+  - 输出目录：`results/fig5_200k_s128_1024_parallel_fixed_load/Cir/`
+  - total：`95.3424 s`
+  - `si_total = 67.411 s`
+  - `rsi_total = 27.7428 s`
+  - `rsi_plan = 22.0357 s`
+  - `rsi_sweep = 5.22518 s`
+  - `rsi_plan_fixed_cache_chunks = 22356`
+  - `rsi_plan_fixed_cache_hits = 22356`
+  - `rsi_plan_fixed_cache_misses = 0`
+  - `rsi_plan_fixed_cache_wall = 9.33258 s`
+  - 对比上一版 1024：total `283.002 s -> 95.3424 s`，`rsi_plan 209.44 s -> 22.0357 s`。
+  - 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+  - 对比上一版 1024 输出，SI/RSI/RSI-tail 逐值 `max_abs = 0`。
+
+结论：当前最有效的 RSI plan 优化是并行化 fixed chunk cache load，而不是扩大 host cache 或默认开启 super-plan。按 1024 samples 线性外推，8192 samples 的端到端时间从原先约 `29 min` 降到约 `5 min` 量级。
 
 ### 10. SI sweep breakdown
 

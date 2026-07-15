@@ -843,6 +843,7 @@ struct PlanChunkTiming {
     std::size_t fixedCacheChunks = 0;
     std::size_t fixedCacheHits = 0;
     std::size_t fixedCacheMisses = 0;
+    double fixedCacheWallSeconds = 0.0;
 };
 
 void accumulatePlanChunkTiming(PlanChunkTiming& total, const PlanChunkTiming& step) {
@@ -857,6 +858,7 @@ void accumulatePlanChunkTiming(PlanChunkTiming& total, const PlanChunkTiming& st
     total.fixedCacheChunks += step.fixedCacheChunks;
     total.fixedCacheHits += step.fixedCacheHits;
     total.fixedCacheMisses += step.fixedCacheMisses;
+    total.fixedCacheWallSeconds += step.fixedCacheWallSeconds;
 }
 
 std::size_t hostPlanChunkBytes(const HostPlanChunk& chunk) {
@@ -1509,6 +1511,7 @@ HostPlanChunk preparePlanChunkHost(
                 requestedLocal[globalDirections[local]] = local;
             }
             localPlans.resize(K);
+            std::vector<std::pair<int, int>> fixedChunkRanges;
             for (int chunkStart = 0; chunkStart < M; chunkStart += fixedChunkSize) {
                 const int chunkEnd = std::min(chunkStart + fixedChunkSize, M);
                 bool needed = false;
@@ -1519,7 +1522,11 @@ HostPlanChunk preparePlanChunkHost(
                     }
                 }
                 if (!needed) continue;
+                fixedChunkRanges.emplace_back(chunkStart, chunkEnd);
+            }
 
+            auto processFixedChunk = [&](int chunkStart, int chunkEnd) {
+                PlanChunkTiming localTiming;
                 std::vector<int> fixedDirections;
                 fixedDirections.reserve(chunkEnd - chunkStart);
                 for (int global = chunkStart; global < chunkEnd; ++global) {
@@ -1529,48 +1536,38 @@ HostPlanChunk preparePlanChunkHost(
                 const std::uint64_t fixedKey =
                     sweepPlanChunkCacheKey(cacheKeyContext, mesh, ordinates, fixedDirections);
                 const std::string fixedPath = sweepPlanChunkCachePath(fixedKey);
-                if (timing) {
-                    timing->keySeconds += secondsBetween(
-                        fixedKeyStart, std::chrono::steady_clock::now()
-                    );
-                }
+                localTiming.keySeconds += secondsBetween(
+                    fixedKeyStart, std::chrono::steady_clock::now()
+                );
                 std::vector<SweepPlan> fixedPlans;
                 const auto cacheStart = std::chrono::steady_clock::now();
                 bool fixedLoaded = tryLoadSweepPlanChunkCache(
                     fixedPath, fixedKey, fixedDirections.size(), mesh.cells.size(), fixedPlans
                 );
-                if (timing) {
-                    ++timing->fixedCacheChunks;
-                    if (fixedLoaded) {
-                        ++timing->fixedCacheHits;
-                    } else {
-                        ++timing->fixedCacheMisses;
-                    }
+                ++localTiming.fixedCacheChunks;
+                if (fixedLoaded) {
+                    ++localTiming.fixedCacheHits;
+                } else {
+                    ++localTiming.fixedCacheMisses;
                 }
-                if (timing) {
-                    timing->cacheSeconds += secondsBetween(
-                        cacheStart, std::chrono::steady_clock::now()
-                    );
-                }
+                localTiming.cacheSeconds += secondsBetween(
+                    cacheStart, std::chrono::steady_clock::now()
+                );
                 if (!fixedLoaded) {
                     const auto buildStart = std::chrono::steady_clock::now();
                     fixedPlans = buildSweepPlansParallel(ordinates, sweep, fixedDirections);
-                    if (timing) {
-                        timing->buildSeconds += secondsBetween(
-                            buildStart, std::chrono::steady_clock::now()
-                        );
-                    }
+                    localTiming.buildSeconds += secondsBetween(
+                        buildStart, std::chrono::steady_clock::now()
+                    );
                     if (static_cast<int>(fixedDirections.size()) <= maxCachedChunkDirections) {
                         const auto saveStart = std::chrono::steady_clock::now();
                         saveSweepPlanChunkCache(
                             fixedPath, fixedKey, fixedDirections.size(),
                             mesh.cells.size(), fixedPlans
                         );
-                        if (timing) {
-                            timing->saveSeconds += secondsBetween(
-                                saveStart, std::chrono::steady_clock::now()
-                            );
-                        }
+                        localTiming.saveSeconds += secondsBetween(
+                            saveStart, std::chrono::steady_clock::now()
+                        );
                     }
                 }
                 const auto assembleStart = std::chrono::steady_clock::now();
@@ -1579,11 +1576,80 @@ HostPlanChunk preparePlanChunkHost(
                     if (local < 0) continue;
                     localPlans[local] = fixedPlans[global - chunkStart];
                 }
-                if (timing) {
-                    timing->assembleSeconds += secondsBetween(
-                        assembleStart, std::chrono::steady_clock::now()
-                    );
+                localTiming.assembleSeconds += secondsBetween(
+                    assembleStart, std::chrono::steady_clock::now()
+                );
+                return localTiming;
+            };
+
+            const bool parallelFixedLoad =
+                envFlagEnabled("RSI_CUDA_FIXED_PLAN_PARALLEL_LOAD", true) &&
+                fixedChunkRanges.size() > 1;
+            const auto fixedReuseStart = std::chrono::steady_clock::now();
+            if (parallelFixedLoad) {
+                const unsigned workerCount = std::max(
+                    1u,
+                    std::min<unsigned>(
+                        static_cast<unsigned>(fixedChunkRanges.size()),
+                        static_cast<unsigned>(
+                            envIntValue(
+                                "RSI_CUDA_FIXED_PLAN_LOAD_WORKERS",
+                                static_cast<int>(
+                                    std::min<unsigned>(
+                                        std::max(1u, std::thread::hardware_concurrency()),
+                                        16u
+                                    )
+                                ),
+                                1, 64
+                            )
+                        )
+                    )
+                );
+                std::atomic<std::size_t> nextFixedChunk{0};
+                std::exception_ptr workerError;
+                std::mutex workerErrorMutex;
+                std::mutex timingMutex;
+                std::vector<std::thread> workers;
+                workers.reserve(workerCount);
+                for (unsigned worker = 0; worker < workerCount; ++worker) {
+                    workers.emplace_back([&] {
+                        PlanChunkTiming workerTiming;
+                        try {
+                            while (true) {
+                                const std::size_t index = nextFixedChunk.fetch_add(1);
+                                if (index >= fixedChunkRanges.size()) break;
+                                const auto [chunkStart, chunkEnd] = fixedChunkRanges[index];
+                                accumulatePlanChunkTiming(
+                                    workerTiming, processFixedChunk(chunkStart, chunkEnd)
+                                );
+                            }
+                        } catch (...) {
+                            std::lock_guard<std::mutex> lock(workerErrorMutex);
+                            if (!workerError) workerError = std::current_exception();
+                        }
+                        if (timing) {
+                            std::lock_guard<std::mutex> lock(timingMutex);
+                            accumulatePlanChunkTiming(*timing, workerTiming);
+                        }
+                    });
                 }
+                for (std::thread& worker : workers) worker.join();
+                if (workerError) std::rethrow_exception(workerError);
+            } else {
+                for (const auto& [chunkStart, chunkEnd] : fixedChunkRanges) {
+                    if (timing) {
+                        accumulatePlanChunkTiming(
+                            *timing, processFixedChunk(chunkStart, chunkEnd)
+                        );
+                    } else {
+                        (void)processFixedChunk(chunkStart, chunkEnd);
+                    }
+                }
+            }
+            if (timing) {
+                timing->fixedCacheWallSeconds += secondsBetween(
+                    fixedReuseStart, std::chrono::steady_clock::now()
+                );
             }
         } else {
             const auto buildStart = std::chrono::steady_clock::now();
@@ -3267,6 +3333,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
               << ", si_plan_fixed_cache_chunks=" << siPlanBreakdown.fixedCacheChunks
               << ", si_plan_fixed_cache_hits=" << siPlanBreakdown.fixedCacheHits
               << ", si_plan_fixed_cache_misses=" << siPlanBreakdown.fixedCacheMisses
+              << ", si_plan_fixed_cache_wall=" << siPlanBreakdown.fixedCacheWallSeconds
               << "\n";
     std::cout << "CUDA streaming timing: rsi_total=" << rsiTotalSeconds
               << ", rsi_plan=" << rsiPlanSeconds
@@ -3289,6 +3356,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
               << ", rsi_plan_fixed_cache_chunks=" << rsiPlanBreakdown.fixedCacheChunks
               << ", rsi_plan_fixed_cache_hits=" << rsiPlanBreakdown.fixedCacheHits
               << ", rsi_plan_fixed_cache_misses=" << rsiPlanBreakdown.fixedCacheMisses
+              << ", rsi_plan_fixed_cache_wall=" << rsiPlanBreakdown.fixedCacheWallSeconds
               << "\n";
     std::cout << "CUDA streaming Figure 5 complete: cells=" << C
               << ", directions=" << M
