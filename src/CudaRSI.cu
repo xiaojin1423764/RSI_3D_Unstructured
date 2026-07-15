@@ -72,18 +72,22 @@ struct CudaEventTimer {
 template <typename T>
 struct DeviceArray {
     T* ptr = nullptr;
+    std::size_t capacity = 0;
 
     DeviceArray() = default;
     DeviceArray(const DeviceArray&) = delete;
     DeviceArray& operator=(const DeviceArray&) = delete;
-    DeviceArray(DeviceArray&& other) noexcept : ptr(other.ptr) {
+    DeviceArray(DeviceArray&& other) noexcept : ptr(other.ptr), capacity(other.capacity) {
         other.ptr = nullptr;
+        other.capacity = 0;
     }
     DeviceArray& operator=(DeviceArray&& other) noexcept {
         if (this == &other) return *this;
         if (ptr) cudaFree(ptr);
         ptr = other.ptr;
+        capacity = other.capacity;
         other.ptr = nullptr;
+        other.capacity = 0;
         return *this;
     }
 
@@ -92,10 +96,19 @@ struct DeviceArray {
     }
 
     void allocate(std::size_t count) {
+        if (count == 0) return;
+        if (ptr && capacity >= count) return;
+        if (ptr) {
+            cudaFree(ptr);
+            ptr = nullptr;
+            capacity = 0;
+        }
         checkCuda(cudaMalloc(reinterpret_cast<void**>(&ptr), count * sizeof(T)), "cudaMalloc");
+        capacity = count;
     }
 
     void copyFrom(const std::vector<T>& values) {
+        if (values.empty()) return;
         allocate(values.size());
         checkCuda(
             cudaMemcpy(ptr, values.data(), values.size() * sizeof(T), cudaMemcpyHostToDevice),
@@ -1517,31 +1530,39 @@ HostPlanChunk preparePlanChunkHost(
     return host;
 }
 
+void uploadPreparedPlanChunkInto(
+    HostPlanChunk&& host,
+    DevicePlanChunk& chunk,
+    PlanChunkTiming* timing = nullptr
+) {
+    const auto uploadStart = std::chrono::steady_clock::now();
+    chunk.directionCount = host.directionCount;
+    chunk.maxSweepLevelCount = host.maxSweepLevelCount;
+    chunk.maxSweepLevelWidth = host.maxSweepLevelWidth;
+    chunk.ordinateX.copyFrom(host.ordinateX);
+    chunk.ordinateY.copyFrom(host.ordinateY);
+    chunk.ordinateZ.copyFrom(host.ordinateZ);
+    chunk.weights.copyFrom(host.weights);
+    chunk.hasCycle.copyFrom(host.hasCycle);
+    chunk.levelOffsetBase.copyFrom(host.levelOffsetBase);
+    chunk.levelCount.copyFrom(host.levelCount);
+    chunk.levelOffsets.copyFrom(host.levelOffsets);
+    chunk.directions.copyFrom(host.directions);
+    chunk.orders.copyFrom(host.orders);
+    chunk.hostHasCycle = std::move(host.hasCycle);
+    chunk.hostLevelCount = std::move(host.levelCount);
+    chunk.globalDirections = std::move(host.globalDirections);
+    if (timing) {
+        timing->uploadSeconds += secondsBetween(uploadStart, std::chrono::steady_clock::now());
+    }
+}
+
 std::unique_ptr<DevicePlanChunk> uploadPreparedPlanChunk(
     HostPlanChunk&& host,
     PlanChunkTiming* timing = nullptr
 ) {
-    const auto uploadStart = std::chrono::steady_clock::now();
     auto chunk = std::make_unique<DevicePlanChunk>();
-    chunk->directionCount = host.directionCount;
-    chunk->maxSweepLevelCount = host.maxSweepLevelCount;
-    chunk->maxSweepLevelWidth = host.maxSweepLevelWidth;
-    chunk->ordinateX.copyFrom(host.ordinateX);
-    chunk->ordinateY.copyFrom(host.ordinateY);
-    chunk->ordinateZ.copyFrom(host.ordinateZ);
-    chunk->weights.copyFrom(host.weights);
-    chunk->hasCycle.copyFrom(host.hasCycle);
-    chunk->levelOffsetBase.copyFrom(host.levelOffsetBase);
-    chunk->levelCount.copyFrom(host.levelCount);
-    chunk->levelOffsets.copyFrom(host.levelOffsets);
-    chunk->directions.copyFrom(host.directions);
-    chunk->orders.copyFrom(host.orders);
-    chunk->hostHasCycle = std::move(host.hasCycle);
-    chunk->hostLevelCount = std::move(host.levelCount);
-    chunk->globalDirections = std::move(host.globalDirections);
-    if (timing) {
-        timing->uploadSeconds += secondsBetween(uploadStart, std::chrono::steady_clock::now());
-    }
+    uploadPreparedPlanChunkInto(std::move(host), *chunk, timing);
     return chunk;
 }
 
@@ -1560,16 +1581,6 @@ std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
         std::move(host), timing
     );
     return chunk;
-}
-
-std::size_t estimateDevicePlanChunkBytes(const DevicePlanChunk& chunk, int cellCount) {
-    const std::size_t K = static_cast<std::size_t>(chunk.directionCount);
-    const std::size_t C = static_cast<std::size_t>(cellCount);
-    std::size_t bytes = K * C * sizeof(int);
-    bytes += K * (3 * sizeof(double) + sizeof(double));
-    bytes += K * (sizeof(unsigned char) + 3 * sizeof(int));
-    bytes += static_cast<std::size_t>(chunk.maxSweepLevelCount + 1) * K * sizeof(int);
-    return bytes;
 }
 
 constexpr std::uint64_t siCheckpointMagic = 0x5253495349435031ULL;
@@ -2313,6 +2324,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         std::vector<std::unique_ptr<HostPlanChunk>> siHostPlanCache(
             siDirectionChunks.size()
         );
+        DevicePlanChunk siTemporaryPlanChunk;
         std::vector<std::size_t> siDevicePlanCacheChunkBytes(siDirectionChunks.size(), 0);
         std::vector<std::size_t> siHostPlanCacheChunkBytes(siDirectionChunks.size(), 0);
         std::vector<double> siDevicePlanCacheScore(siDirectionChunks.size(), 0.0);
@@ -2409,35 +2421,12 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                              siDevicePlanCacheBudget)) {
                         hostChunkForCache = std::make_unique<HostPlanChunk>(hostChunk);
                     }
-                    temporaryChunk = uploadPreparedPlanChunk(
-                        std::move(hostChunk), &chunkPlanTiming
-                    );
-                    const auto planSyncStart = std::chrono::steady_clock::now();
-                    checkCuda(
-                        cudaDeviceSynchronize(),
-                        "synchronize streaming CUDA SI plan upload"
-                    );
-                    chunkPlanTiming.syncSeconds += secondsBetween(
-                        planSyncStart, std::chrono::steady_clock::now()
-                    );
-                    siPlanBreakdown.keySeconds += chunkPlanTiming.keySeconds;
-                    siPlanBreakdown.cacheSeconds += chunkPlanTiming.cacheSeconds;
-                    siPlanBreakdown.buildSeconds += chunkPlanTiming.buildSeconds;
-                    siPlanBreakdown.saveSeconds += chunkPlanTiming.saveSeconds;
-                    siPlanBreakdown.assembleSeconds += chunkPlanTiming.assembleSeconds;
-                    siPlanBreakdown.packSeconds += chunkPlanTiming.packSeconds;
-                    siPlanBreakdown.uploadSeconds += chunkPlanTiming.uploadSeconds;
-                    siPlanBreakdown.syncSeconds += chunkPlanTiming.syncSeconds;
-                    const std::size_t chunkBytes =
-                        estimateDevicePlanChunkBytes(*temporaryChunk, C);
-                    const double planElapsed =
-                        secondsBetween(planStart, std::chrono::steady_clock::now());
-                    const double planAdmissionScore =
+                    const std::size_t chunkBytes = projectedDeviceChunkBytes;
+                    const double preUploadAdmissionScore =
                         chunkPlanTiming.cacheSeconds +
                         chunkPlanTiming.buildSeconds +
-                        chunkPlanTiming.packSeconds +
-                        chunkPlanTiming.uploadSeconds +
-                        chunkPlanTiming.syncSeconds;
+                        chunkPlanTiming.packSeconds;
+                    bool admitDeviceCache = false;
                     if (siDevicePlanCacheBudget > 0 &&
                         chunkBytes <= siDevicePlanCacheBudget &&
                         iteration == 1 &&
@@ -2445,7 +2434,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         while (siDevicePlanCacheBytes + chunkBytes >
                                siDevicePlanCacheBudget) {
                             std::size_t victim = siDevicePlanCache.size();
-                            double victimScore = planAdmissionScore;
+                            double victimScore = preUploadAdmissionScore;
                             for (std::size_t candidate = 0;
                                  candidate < siDevicePlanCache.size(); ++candidate) {
                                 if (!siDevicePlanCache[candidate]) continue;
@@ -2462,28 +2451,59 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         }
                         if (siDevicePlanCacheBytes + chunkBytes <=
                             siDevicePlanCacheBudget) {
-                            siDevicePlanCacheBytes += chunkBytes;
-                            siDevicePlanCacheChunkBytes[chunkIndex] = chunkBytes;
-                            siDevicePlanCacheScore[chunkIndex] = planAdmissionScore;
-                            siDevicePlanCache[chunkIndex] = std::move(temporaryChunk);
-                            chunk = siDevicePlanCache[chunkIndex].get();
+                            admitDeviceCache = true;
                         }
                     } else if (siDevicePlanCacheBudget > 0 &&
                                siDevicePlanCacheBytes + chunkBytes <=
                                siDevicePlanCacheBudget) {
+                        admitDeviceCache = true;
+                    }
+
+                    if (admitDeviceCache) {
+                        temporaryChunk = std::make_unique<DevicePlanChunk>();
+                        uploadPreparedPlanChunkInto(
+                            std::move(hostChunk), *temporaryChunk, &chunkPlanTiming
+                        );
+                    } else {
+                        uploadPreparedPlanChunkInto(
+                            std::move(hostChunk), siTemporaryPlanChunk, &chunkPlanTiming
+                        );
+                    }
+                    const auto planSyncStart = std::chrono::steady_clock::now();
+                    checkCuda(
+                        cudaDeviceSynchronize(),
+                        "synchronize streaming CUDA SI plan upload"
+                    );
+                    chunkPlanTiming.syncSeconds += secondsBetween(
+                        planSyncStart, std::chrono::steady_clock::now()
+                    );
+                    siPlanBreakdown.keySeconds += chunkPlanTiming.keySeconds;
+                    siPlanBreakdown.cacheSeconds += chunkPlanTiming.cacheSeconds;
+                    siPlanBreakdown.buildSeconds += chunkPlanTiming.buildSeconds;
+                    siPlanBreakdown.saveSeconds += chunkPlanTiming.saveSeconds;
+                    siPlanBreakdown.assembleSeconds += chunkPlanTiming.assembleSeconds;
+                    siPlanBreakdown.packSeconds += chunkPlanTiming.packSeconds;
+                    siPlanBreakdown.uploadSeconds += chunkPlanTiming.uploadSeconds;
+                    siPlanBreakdown.syncSeconds += chunkPlanTiming.syncSeconds;
+                    const double planAdmissionScore =
+                        preUploadAdmissionScore +
+                        chunkPlanTiming.uploadSeconds +
+                        chunkPlanTiming.syncSeconds;
+                    if (admitDeviceCache) {
                         siDevicePlanCacheBytes += chunkBytes;
                         siDevicePlanCacheChunkBytes[chunkIndex] = chunkBytes;
                         siDevicePlanCacheScore[chunkIndex] = planAdmissionScore;
                         siDevicePlanCache[chunkIndex] = std::move(temporaryChunk);
                         chunk = siDevicePlanCache[chunkIndex].get();
+                    } else {
+                        chunk = &siTemporaryPlanChunk;
                     }
-                    if (!chunk && hostChunkForCache &&
+                    if (!admitDeviceCache && hostChunkForCache &&
                         siHostPlanCacheBytes + hostChunkBytes <= siHostPlanCacheBudget) {
                         siHostPlanCacheBytes += hostChunkBytes;
                         siHostPlanCacheChunkBytes[chunkIndex] = hostChunkBytes;
                         siHostPlanCache[chunkIndex] = std::move(hostChunkForCache);
                     }
-                    if (!chunk) chunk = temporaryChunk.get();
                 }
                 siPlanSeconds += secondsBetween(planStart, std::chrono::steady_clock::now());
                 scheduleSIPrefetch(chunkIndex + 1);

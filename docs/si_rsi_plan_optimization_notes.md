@@ -399,7 +399,23 @@ SI packed host plan cache 实测：
 上传路径和压缩方向：
 
 - 当前 `upload` 仍约 `14 s`，是 plan 的主要剩余项之一。
-- 后续更可行的是复用 temporary `DevicePlanChunk` buffer 或做 pinned/async H2D；这需要重构 `DeviceArray` 生命周期和 stream 管理，暂不作为默认改动。
+- 已实现 temporary `DevicePlanChunk` buffer 复用：
+  - `DeviceArray` 记录 capacity，重复上传到同一个 scratch chunk 时复用已有 device allocation。
+  - 未进入 device cache 的 SI chunk 上传到 `siTemporaryPlanChunk`，避免每轮反复 `cudaMalloc/cudaFree`。
+  - cached device chunk 仍使用独立 `DevicePlanChunk`，保证常驻计划的生命周期不受 scratch 影响。
+- `200k + S128 + 16 samples`，默认 10 GiB device cache + 4 GiB host plan cache + temporary buffer reuse：
+  - 输出目录：`results/fig5_200k_s128_16_temp_buffer_reuse/Cir/`
+  - CUDA internal total：`84.0145 s`
+  - `si_plan = 43.6488 s`
+  - `si_sweep = 38.5557 s`
+  - `si_plan_breakdown_cache = 25.067 s`
+  - `si_plan_breakdown_pack = 1.04606 s`
+  - `si_plan_breakdown_upload = 13.9563 s`
+  - host cache：`25/130` chunks，hits `313`，misses `142`
+  - 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+  - 对比 fused default 输出，SI/RSI/RSI-tail 逐值 `max_abs = 0`。
+- 结论：temporary buffer reuse 小幅降低 upload（约 `14.64 s -> 13.96 s`），但本轮 cache 波动使端到端没有改善；保留该实现，因为它降低了分配抖动且不改变数值。
+- 下一步如果继续压 upload，更可能需要 pinned host memory 和 async H2D；这需要重构 host buffer 生命周期和 CUDA stream 管理，暂不默认做。
 - 压缩 `orders` 对磁盘 cache 可能有帮助，但 200k cell 无法用 `uint16`，GPU 端压缩还需要解码 kernel，风险较高，暂只记录。
 
 ### 9. SI sweep breakdown
