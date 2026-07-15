@@ -37,7 +37,7 @@ static void printUsage(const char* prog) {
     std::cerr
         << "用法:\n"
         << "  " << prog << " [cells.csv faces.csv [figure2_data.csv] [rectangle|circle]]\n"
-        << "  " << prog << " --source-shape rectangle|circle [--gpu] [--out figure2_data.csv] [--figure5-dir examples/csv_data] [--only all|figure2|figure5|sweep-stats] [cells.csv faces.csv]\n";
+        << "  " << prog << " --source-shape rectangle|circle [--gpu] [--out figure2_data.csv] [--figure5-dir examples/csv_data] [--figure5-fine-sn 32] [--figure5-samples 512] [--only all|figure2|figure5|sweep-stats] [cells.csv faces.csv]\n";
 }
 
 int main(int argc, char** argv) {
@@ -47,6 +47,8 @@ int main(int argc, char** argv) {
     std::string figure5Dir = "examples/csv_data";
     std::string sourceShape = "rectangle";
     std::string only = "all";
+    int figure5FineSN = 32;
+    int figure5Samples = 512;
     bool useGPU = false;
 
     std::vector<std::string> positional;
@@ -76,6 +78,18 @@ int main(int argc, char** argv) {
                 return 1;
             }
             only = argv[++i];
+        } else if (arg == "--figure5-fine-sn") {
+            if (i + 1 >= argc) {
+                printUsage(argv[0]);
+                return 1;
+            }
+            figure5FineSN = std::stoi(argv[++i]);
+        } else if (arg == "--figure5-samples") {
+            if (i + 1 >= argc) {
+                printUsage(argv[0]);
+                return 1;
+            }
+            figure5Samples = std::stoi(argv[++i]);
         } else if (arg == "--gpu") {
             useGPU = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -114,6 +128,12 @@ int main(int argc, char** argv) {
         if (only != "all" && only != "figure2" && only != "figure5" &&
             only != "sweep-stats") {
             throw std::runtime_error("--only 必须是 all、figure2、figure5 或 sweep-stats");
+        }
+        if (figure5FineSN < 2 || figure5FineSN % 2 != 0) {
+            throw std::runtime_error("--figure5-fine-sn 必须是 >=2 的偶数");
+        }
+        if (figure5Samples <= 0) {
+            throw std::runtime_error("--figure5-samples 必须为正整数");
         }
 
         Mesh mesh = Mesh::readCSV(cellsFile, facesFile);
@@ -201,17 +221,17 @@ int main(int argc, char** argv) {
             // 细角度SI
             RSIConfig fineCfg;
             fineCfg.groupCount = 1;
-            fineCfg.angularN = 32;
+            fineCfg.angularN = figure5FineSN;
             fineCfg.maxSIters = 80;
             fineCfg.siTolerance = 1e-10;
-            fineCfg.sampleCounts = {512};
+            fineCfg.sampleCounts = {figure5Samples};
             fineCfg.scattering = "isotropic";
             fineCfg.sourceShape = sourceShape;
             fineCfg.seed = 20260513u;
             fineCfg.useGPU = useGPU;
 
             RSISolver fineSolver(mesh, fineCfg);
-            int S = 512;
+            int S = figure5Samples;
             int tailExtra = 10;
             if (useGPU) {
                 const Figure5Fields fields = fineSolver.runFigure5GPU(S, tailExtra);

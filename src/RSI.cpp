@@ -788,10 +788,31 @@ Figure5Fields RSISolver::runFigure5GPU(int sampleCount, int tailExtra) const {
             "CUDA Figure 5 currently supports only isotropic scattering with G=1"
         );
     }
-    const CudaFigure5Result cuda = runFigure5Cuda(
-        mesh_, ordinates_, cachedSweepPlans(), cfg_.sourceShape, cfg_.seed,
-        cfg_.maxSIters, cfg_.siTolerance, sampleCount, tailExtra
-    );
+    const std::size_t estimatedOrderBytes =
+        static_cast<std::size_t>(ordinates_.size()) *
+        static_cast<std::size_t>(mesh_.cells.size()) *
+        sizeof(int);
+    std::size_t streamingPlanThresholdBytes =
+        static_cast<std::size_t>(8) * 1024 * 1024 * 1024;
+    if (const char* thresholdMb = std::getenv("RSI_CUDA_STREAMING_PLAN_THRESHOLD_MB")) {
+        const long long value = std::atoll(thresholdMb);
+        if (value >= 0) {
+            streamingPlanThresholdBytes =
+                static_cast<std::size_t>(value) * 1024 * 1024;
+        }
+    }
+    CudaFigure5Result cuda;
+    if (estimatedOrderBytes > streamingPlanThresholdBytes) {
+        cuda = runFigure5CudaStreamingPlans(
+            mesh_, ordinates_, sweep_, cfg_.sourceShape, cfg_.seed,
+            cfg_.maxSIters, cfg_.siTolerance, sampleCount, tailExtra
+        );
+    } else {
+        cuda = runFigure5Cuda(
+            mesh_, ordinates_, cachedSweepPlans(), cfg_.sourceShape, cfg_.seed,
+            cfg_.maxSIters, cfg_.siTolerance, sampleCount, tailExtra
+        );
+    }
     return {cuda.siFine, cuda.rsi, cuda.rsiTail, cuda.convergedN};
 #else
     (void)sampleCount;

@@ -27,6 +27,18 @@ CudaFigure5Result runFigure5Cuda(
     int tailExtra
 );
 
+CudaFigure5Result runFigure5CudaStreamingPlans(
+    const Mesh& mesh,
+    const std::vector<Ordinate>& ordinates,
+    const TransportSweep& sweep,
+    const std::string& sourceShape,
+    unsigned int seed,
+    int maxSIters,
+    double siTolerance,
+    int sampleCount,
+    int tailExtra
+);
+
 std::vector<double> runSIFieldCuda(
     const Mesh& mesh,
     const std::vector<Ordinate>& ordinates,
