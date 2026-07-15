@@ -512,6 +512,75 @@ __global__ void sweepLevelTiledKernel(
     currentPsi[cellIndex] = rhs / diagonal;
 }
 
+__global__ void sweepLevelFusedKernel(
+    DeviceMeshView mesh,
+    const double* ordinateX,
+    const double* ordinateY,
+    const double* ordinateZ,
+    const int* sweepOrders,
+    const int* sweepLevelOffsetBase,
+    const int* sweepLevelCount,
+    const int* sweepLevelOffsets,
+    const int* selectedDirection,
+    int directionBatch,
+    int sourceShape,
+    const double* previousPsi,
+    double* currentPsi,
+    bool sourceShared
+) {
+    const int localDirection = blockIdx.x;
+    if (localDirection >= directionBatch) return;
+
+    const int C = mesh.cellCount;
+    const int direction = selectedDirection[localDirection];
+    const int levelCount = sweepLevelCount[direction];
+    const double ox = ordinateX[direction];
+    const double oy = ordinateY[direction];
+    const double oz = ordinateZ[direction];
+    const int* order = sweepOrders + static_cast<std::size_t>(direction) * C;
+    const int levelBase = sweepLevelOffsetBase[direction];
+    const std::size_t outputIndex = static_cast<std::size_t>(localDirection);
+
+    for (int level = 0; level < levelCount; ++level) {
+        const int begin = sweepLevelOffsets[levelBase + level];
+        const int end = sweepLevelOffsets[levelBase + level + 1];
+        for (int index = begin + threadIdx.x; index < end; index += blockDim.x) {
+            const int cell = order[index];
+            const std::size_t cellIndex = outputIndex * C + cell;
+            double inflow = 0.0;
+            double outflow = 0.0;
+
+            const int faceBegin = mesh.cellFaceOffsets[cell];
+            const int faceEnd = mesh.cellFaceOffsets[cell + 1];
+            for (int refIndex = faceBegin; refIndex < faceEnd; ++refIndex) {
+                const double nx = mesh.refNx[refIndex];
+                const double ny = mesh.refNy[refIndex];
+                const double nz = mesh.refNz[refIndex];
+                const double mu = ox * nx + oy * ny + oz * nz;
+                const double coefficient = fabs(mu) * mesh.refArea[refIndex];
+                if (coefficient <= 1.0e-14) continue;
+
+                if (mu > 0.0) {
+                    outflow += coefficient;
+                } else {
+                    const int neighbor = mesh.refNeighbor[refIndex];
+                    const double psiIn = neighbor >= 0
+                        ? currentPsi[outputIndex * C + neighbor]
+                        : boundaryInflowRef(mesh, refIndex, ox, oy, oz, sourceShape);
+                    inflow += coefficient * psiIn;
+                }
+            }
+
+            const double source = sourceShared ? previousPsi[cell] : previousPsi[cellIndex];
+            const double rhs =
+                mesh.volume[cell] * (mesh.sigmaS[cell] * source + mesh.cellQ[cell]) + inflow;
+            const double diagonal = mesh.sigmaT[cell] * mesh.volume[cell] + outflow;
+            currentPsi[cellIndex] = rhs / diagonal;
+        }
+        __syncthreads();
+    }
+}
+
 __global__ void reduceSamplesKernel(
     const double* sampleAccum,
     int sampleCount,
@@ -2250,6 +2319,8 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         double* previousPhi = phiA.ptr;
         double* currentPhi = phiB.ptr;
         const bool useSIWavefront = envFlagEnabled("RSI_CUDA_SI_WAVEFRONT", true);
+        const bool useSIFusedWavefront =
+            envFlagEnabled("RSI_CUDA_SI_FUSED_WAVEFRONT", true);
         const bool useSITiledWavefront =
             envFlagEnabled("RSI_CUDA_SI_TILED_WAVEFRONT", true);
         const bool useSISweepBreakdown =
@@ -2384,46 +2455,69 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                                 maxLevelCount, chunk->hostLevelCount[local]
                             );
                         }
-                        for (int level = 0; level < maxLevelCount; ++level) {
-                            if (useSITiledWavefront && siLevelTileCount > 1) {
-                                const dim3 grid(directionBatch, siLevelTileCount);
-                                sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
-                                    staticProblem->mesh.view(C),
-                                    chunk->ordinateX.ptr,
-                                    chunk->ordinateY.ptr,
-                                    chunk->ordinateZ.ptr,
-                                    chunk->orders.ptr,
-                                    chunk->levelOffsetBase.ptr,
-                                    chunk->levelCount.ptr,
-                                    chunk->levelOffsets.ptr,
-                                    chunk->directions.ptr + localStart,
-                                    directionBatch,
-                                    sourceShapeCode,
-                                    previousPhi,
-                                    angularPsi.ptr,
-                                    true,
-                                    level
-                                );
-                            } else {
-                                sweepLevelKernel<<<directionBatch, levelSweepThreads>>>(
-                                    staticProblem->mesh.view(C),
-                                    chunk->ordinateX.ptr,
-                                    chunk->ordinateY.ptr,
-                                    chunk->ordinateZ.ptr,
-                                    chunk->orders.ptr,
-                                    chunk->levelOffsetBase.ptr,
-                                    chunk->levelCount.ptr,
-                                    chunk->levelOffsets.ptr,
-                                    chunk->directions.ptr + localStart,
-                                    directionBatch,
-                                    sourceShapeCode,
-                                    previousPhi,
-                                    angularPsi.ptr,
-                                    true,
-                                    level
-                                );
+                        if (useSIFusedWavefront) {
+                            sweepLevelFusedKernel<<<directionBatch, levelSweepThreads>>>(
+                                staticProblem->mesh.view(C),
+                                chunk->ordinateX.ptr,
+                                chunk->ordinateY.ptr,
+                                chunk->ordinateZ.ptr,
+                                chunk->orders.ptr,
+                                chunk->levelOffsetBase.ptr,
+                                chunk->levelCount.ptr,
+                                chunk->levelOffsets.ptr,
+                                chunk->directions.ptr + localStart,
+                                directionBatch,
+                                sourceShapeCode,
+                                previousPhi,
+                                angularPsi.ptr,
+                                true
+                            );
+                            checkCuda(
+                                cudaGetLastError(),
+                                "launch streaming CUDA SI fused levels"
+                            );
+                        } else {
+                            for (int level = 0; level < maxLevelCount; ++level) {
+                                if (useSITiledWavefront && siLevelTileCount > 1) {
+                                    const dim3 grid(directionBatch, siLevelTileCount);
+                                    sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
+                                        staticProblem->mesh.view(C),
+                                        chunk->ordinateX.ptr,
+                                        chunk->ordinateY.ptr,
+                                        chunk->ordinateZ.ptr,
+                                        chunk->orders.ptr,
+                                        chunk->levelOffsetBase.ptr,
+                                        chunk->levelCount.ptr,
+                                        chunk->levelOffsets.ptr,
+                                        chunk->directions.ptr + localStart,
+                                        directionBatch,
+                                        sourceShapeCode,
+                                        previousPhi,
+                                        angularPsi.ptr,
+                                        true,
+                                        level
+                                    );
+                                } else {
+                                    sweepLevelKernel<<<directionBatch, levelSweepThreads>>>(
+                                        staticProblem->mesh.view(C),
+                                        chunk->ordinateX.ptr,
+                                        chunk->ordinateY.ptr,
+                                        chunk->ordinateZ.ptr,
+                                        chunk->orders.ptr,
+                                        chunk->levelOffsetBase.ptr,
+                                        chunk->levelCount.ptr,
+                                        chunk->levelOffsets.ptr,
+                                        chunk->directions.ptr + localStart,
+                                        directionBatch,
+                                        sourceShapeCode,
+                                        previousPhi,
+                                        angularPsi.ptr,
+                                        true,
+                                        level
+                                    );
+                                }
+                                checkCuda(cudaGetLastError(), "launch streaming CUDA SI level");
                             }
-                            checkCuda(cudaGetLastError(), "launch streaming CUDA SI level");
                         }
                     } else {
                         const int directionSweepBlocks =

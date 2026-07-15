@@ -406,11 +406,59 @@ RSI_CUDA_SI_SWEEP_BREAKDOWN=1
 - chunk 末尾同步几乎可以忽略。
 - 下一步若优化 sweep，应看 `sweepLevelTiledKernel` 的访存/并行度/level 调度，而不是 clear/reduce。
 
+### 10. SI fused wavefront kernel
+
+已增加 streaming SI fused wavefront 路径：
+
+```text
+RSI_CUDA_SI_FUSED_WAVEFRONT=1  # default
+```
+
+实现方式：
+
+- 对 acyclic wavefront，每个 direction 使用一个 CUDA block。
+- 在 `sweepLevelFusedKernel` 内部按 level 顺序循环。
+- level 之间用 block 内 `__syncthreads()` 保证同一 direction 的依赖顺序。
+- cyclic direction 仍走原 sweep sample fallback。
+- 可用 `RSI_CUDA_SI_FUSED_WAVEFRONT=0` 回退到原 tiled level-by-level launch。
+
+动机：
+
+- `nsys` 显示 200k/S128 smoke 中 `cudaLaunchKernel` 调用约 `742707` 次，API 总耗时约 `7.78 s`。
+- 原 tiled wavefront 是 chunk × level × iteration 启动 kernel，launch 数很高。
+- fused kernel 用一个 launch 覆盖一个 direction batch 的所有 levels，显著减少 launch 数。
+
+实测 `200k + S128 + 16 samples`，`RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=10000`：
+
+- 原 tiled 10 GiB：
+  - CUDA internal total：`87.6393 s`
+  - `si_plan = 39.851 s`
+  - `si_sweep = 45.3119 s`
+- fused wavefront 显式开启：
+  - 输出目录：`results/fig5_200k_s128_16_fused_wavefront/Cir/`
+  - CUDA internal total：`75.4776 s`
+  - `si_plan = 41.1578 s`
+  - `si_sweep = 32.4425 s`
+- fused wavefront 默认开启后回归：
+  - 输出目录：`results/fig5_200k_s128_16_fused_default/Cir/`
+  - CUDA internal total：`71.55 s`
+  - `si_total = 70.2645 s`
+  - `si_plan = 37.7765 s`
+  - `si_sweep = 31.887 s`
+  - cached chunks：`105/130`
+  - 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+  - 对比原 tiled 10 GiB 的 SI/RSI/RSI-tail CSV，逐值 `max_abs = 0`。
+
+小网格补充：
+
+- `30k + S40 + 16 samples` 强制 streaming 下，fused `si_sweep = 26.3354 s`，原 tiled `si_sweep = 23.0909 s`。
+- 因此 fused 默认主要面向 200k/S128 这类大网格高角度场景；若小网格强制 streaming，可用 `RSI_CUDA_SI_FUSED_WAVEFRONT=0` 回退。
+
 ## 当前推荐优先级
 
-1. 针对 `sweepLevelTiledKernel` 做 profiling/优化，当前 SI sweep 主要耗时在 kernel。
-2. 继续扫 SI device cache 预算，重点测试 `9000/10000/11000`，避免 12 GiB 显存压力导致 sweep 退化。
-3. 用 10 GiB SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
+1. 用 fused wavefront + 10 GiB SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
+2. 继续 profile/优化 `sweepLevelFusedKernel`，重点看单 direction block 内的 level 循环和访存。
+3. 继续扫 SI device cache 预算，重点测试 `9000/10000/11000`，避免 12 GiB 显存压力导致 sweep 退化。
 4. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 cache load。
 5. 将 `maxSamplesPerBatch=128` 改为环境变量，测试 `192/256`，减少 full 8192 的 batch 数。
 6. 基于 cache 命中/常驻统计自动选择预算。
