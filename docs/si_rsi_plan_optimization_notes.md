@@ -45,6 +45,13 @@
    - streaming SI 阶段可把一部分已上传的 `DevicePlanChunk` 常驻 GPU。
    - 默认 `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=8192`。
    - 可设为 `0` 关闭，或设为 `4096` 降低显存占用。
+   - 已输出常驻 chunk 数、device bytes、hit/miss 统计。
+   - 已预留按首轮 plan 耗时选择常驻 chunk：`RSI_CUDA_SI_PLAN_COST_ADMISSION=1`。
+   - 已预留 SI host plan 异步预取：`RSI_CUDA_SI_PLAN_PREFETCH=1`。
+
+8. cache 文件目录 shard：
+   - 已增加 opt-in 子目录 shard：`RSI_SWEEP_PLAN_CACHE_SHARD_DIRS=1`。
+   - 默认关闭，继续使用旧 cache 路径，避免影响已有 warm cache 性能。
 
 ## 已验证结果
 
@@ -80,6 +87,17 @@
   - `si_plan = 90.1124 s`
   - `si_sweep = 42.9842 s`
   - 峰值显存约 `13.4 GiB / 16.3 GiB`
+- 继续打开 `RSI_CUDA_SI_PLAN_COST_ADMISSION=1` 和 `RSI_CUDA_SI_PLAN_PREFETCH=1`：
+  - wall time 明显变差，CUDA internal total `320.042 s`
+  - `si_plan = 104.569 s`
+  - `si_sweep = 173.738 s`
+  - 主要原因是后台 host prefetch 与 GPU sweep 争用 CPU/内存带宽，默认关闭。
+- 默认关闭 cost-admission/prefetch 后的回归：
+  - wall time `171.60 s`
+  - CUDA internal total `182.778 s`
+  - `si_plan = 103.581 s`
+  - `si_sweep = 58.6512 s`
+  - 4 个 CSV 均为 `194315` 行，`phi0` 非有限值数量为 0。
 
 `200k + S128 + 8192 samples`：
 
@@ -215,11 +233,22 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 
 - 对 RSI fixed-direction chunk 也增加 device 常驻窗口。
 - 输出实际 cached chunk 数和 cache bytes，便于自动调参。
+- 继续保留 `RSI_CUDA_SI_PLAN_COST_ADMISSION` 作为实验开关；当前实测不作为默认。
+- 继续保留 `RSI_CUDA_SI_PLAN_PREFETCH` 作为实验开关；当前实测不作为默认。
+
+### 6. 暂不实施的方向
+
+以下方向暂只记录，不进入当前代码路径：
+
+- 进一步提高默认 SI device cache 预算到 10-12 GiB。
+- 改变 SI 迭代组织，让一个常驻窗口跑多次局部方向。
+- 对 `orders` 做 GPU 端压缩格式或变长解码。
+- 将 SI chunk cache 合并为单一二进制 shard/index 文件；当前只实现了 opt-in 目录 shard。
 
 ## 当前推荐优先级
 
 1. 用 SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
 2. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 `rsi_plan`。
-3. 输出 cache 命中/常驻统计，便于后续自动选择预算。
+3. 基于 cache 命中/常驻统计自动选择预算。
 4. SI chunk size 可配置，继续测试 64/128/256。
 5. 磁盘 cache 压缩。

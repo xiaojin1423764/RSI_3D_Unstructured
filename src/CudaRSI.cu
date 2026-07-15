@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <list>
 #include <memory>
@@ -647,6 +648,23 @@ struct DevicePlanChunk {
     DeviceArray<int> directions;
 };
 
+struct HostPlanChunk {
+    int directionCount = 0;
+    int maxSweepLevelCount = 0;
+    int maxSweepLevelWidth = 0;
+    std::vector<unsigned char> hasCycle;
+    std::vector<int> levelOffsetBase;
+    std::vector<int> levelCount;
+    std::vector<int> levelOffsets;
+    std::vector<int> directions;
+    std::vector<int> globalDirections;
+    std::vector<double> ordinateX;
+    std::vector<double> ordinateY;
+    std::vector<double> ordinateZ;
+    std::vector<double> weights;
+    std::vector<int> orders;
+};
+
 constexpr std::uint64_t planChunkCacheMagic = 0x5253495357434831ULL;
 constexpr std::uint32_t planChunkCacheVersion = 1;
 
@@ -769,17 +787,32 @@ void storeHostPlanChunkCache(std::uint64_t key, const std::vector<SweepPlan>& pl
 }
 
 std::string sweepPlanChunkCachePath(std::uint64_t key) {
-    std::ostringstream name;
+    std::ostringstream hexKey;
+    hexKey << std::hex << key;
+    const std::string keyString = hexKey.str();
+    std::ostringstream base;
     const char* dir = std::getenv("RSI_SWEEP_PLAN_CACHE_DIR");
     if (dir && *dir) {
-        name << dir;
+        base << dir;
         const std::string dirString(dir);
-        if (!dirString.empty() && dirString.back() != '/') name << '/';
+        if (!dirString.empty() && dirString.back() != '/') base << '/';
     } else {
-        name << "results/cache/";
+        base << "results/cache/";
     }
-    name << "rsi_sweep_plan_chunk_" << std::hex << key << ".bin";
-    return name.str();
+    const std::string baseDir = base.str();
+    const std::string legacyPath =
+        baseDir + "rsi_sweep_plan_chunk_" + keyString + ".bin";
+    const char* shardValue = std::getenv("RSI_SWEEP_PLAN_CACHE_SHARD_DIRS");
+    if (!shardValue || std::atoi(shardValue) == 0) {
+        return legacyPath;
+    }
+    const std::string shard = keyString.substr(0, std::min<std::size_t>(2, keyString.size()));
+    const std::string shardedPath =
+        baseDir + shard + "/rsi_sweep_plan_chunk_" + keyString + ".bin";
+    if (!std::filesystem::exists(shardedPath) && std::filesystem::exists(legacyPath)) {
+        return legacyPath;
+    }
+    return shardedPath;
 }
 
 std::uint64_t sweepPlanChunkCacheKey(
@@ -1151,25 +1184,27 @@ std::vector<SweepPlan> buildSweepPlansParallel(
     return plans;
 }
 
-std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
+HostPlanChunk preparePlanChunkHost(
     const Mesh& mesh,
     const std::vector<Ordinate>& ordinates,
     const TransportSweep& sweep,
     const std::vector<int>& globalDirections
 ) {
-    auto chunk = std::make_unique<DevicePlanChunk>();
+    HostPlanChunk host;
     const int C = static_cast<int>(mesh.cells.size());
     const int K = static_cast<int>(globalDirections.size());
     if (K <= 0) throw std::runtime_error("empty CUDA sweep plan chunk");
-    chunk->directionCount = K;
-    chunk->globalDirections = globalDirections;
+    host.directionCount = K;
+    host.globalDirections = globalDirections;
 
-    std::vector<unsigned char> hasCycle(K);
-    std::vector<double> ox(K), oy(K), oz(K), weights(K);
-    std::vector<int> levelOffsetBase(K, 0);
-    std::vector<int> levelCount(K, 0);
-    std::vector<int> levelOffsets;
-    std::vector<int> orders(static_cast<std::size_t>(K) * C);
+    host.hasCycle.resize(K);
+    host.ordinateX.resize(K);
+    host.ordinateY.resize(K);
+    host.ordinateZ.resize(K);
+    host.weights.resize(K);
+    host.levelOffsetBase.assign(K, 0);
+    host.levelCount.assign(K, 0);
+    host.orders.resize(static_cast<std::size_t>(K) * C);
     std::vector<SweepPlan> localPlans;
     const int maxCachedChunkDirections =
         envIntValue("RSI_CUDA_MAX_CACHED_PLAN_CHUNK", 256, 1, 4096);
@@ -1244,37 +1279,37 @@ std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
         if (global < 0 || global >= static_cast<int>(ordinates.size())) {
             throw std::runtime_error("CUDA sweep plan chunk direction out of range");
         }
-        ox[local] = ordinates[global].omega.x;
-        oy[local] = ordinates[global].omega.y;
-        oz[local] = ordinates[global].omega.z;
-        weights[local] = ordinates[global].weight;
+        host.ordinateX[local] = ordinates[global].omega.x;
+        host.ordinateY[local] = ordinates[global].omega.y;
+        host.ordinateZ[local] = ordinates[global].omega.z;
+        host.weights[local] = ordinates[global].weight;
         const SweepPlan& plan = localPlans[local];
         if (static_cast<int>(plan.order.size()) != C) {
             throw std::runtime_error("CUDA sweep order size mismatch");
         }
         std::copy(
             plan.order.begin(), plan.order.end(),
-            orders.begin() + static_cast<std::size_t>(local) * C
+            host.orders.begin() + static_cast<std::size_t>(local) * C
         );
-        hasCycle[local] = plan.hasCycle ? 1 : 0;
+        host.hasCycle[local] = plan.hasCycle ? 1 : 0;
         if (!plan.hasCycle) {
             if (plan.levelOffsets.empty() ||
                 plan.levelOffsets.front() != 0 ||
                 plan.levelOffsets.back() != C) {
                 throw std::runtime_error("CUDA sweep level offsets are inconsistent");
             }
-            levelOffsetBase[local] = static_cast<int>(levelOffsets.size());
-            levelOffsets.insert(
-                levelOffsets.end(), plan.levelOffsets.begin(), plan.levelOffsets.end()
+            host.levelOffsetBase[local] = static_cast<int>(host.levelOffsets.size());
+            host.levelOffsets.insert(
+                host.levelOffsets.end(), plan.levelOffsets.begin(), plan.levelOffsets.end()
             );
-            levelCount[local] = static_cast<int>(plan.levelOffsets.size()) - 1;
-            chunk->maxSweepLevelCount =
-                std::max(chunk->maxSweepLevelCount, levelCount[local]);
-            for (int level = 0; level < levelCount[local]; ++level) {
+            host.levelCount[local] = static_cast<int>(plan.levelOffsets.size()) - 1;
+            host.maxSweepLevelCount =
+                std::max(host.maxSweepLevelCount, host.levelCount[local]);
+            for (int level = 0; level < host.levelCount[local]; ++level) {
                 const int width =
                     plan.levelOffsets[static_cast<std::size_t>(level + 1)] -
                     plan.levelOffsets[static_cast<std::size_t>(level)];
-                chunk->maxSweepLevelWidth = std::max(chunk->maxSweepLevelWidth, width);
+                host.maxSweepLevelWidth = std::max(host.maxSweepLevelWidth, width);
             }
         }
     }
@@ -1284,20 +1319,40 @@ std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
         );
     }
 
-    chunk->hostHasCycle = hasCycle;
-    chunk->hostLevelCount = levelCount;
-    chunk->ordinateX.copyFrom(ox);
-    chunk->ordinateY.copyFrom(oy);
-    chunk->ordinateZ.copyFrom(oz);
-    chunk->weights.copyFrom(weights);
-    chunk->hasCycle.copyFrom(hasCycle);
-    chunk->levelOffsetBase.copyFrom(levelOffsetBase);
-    chunk->levelCount.copyFrom(levelCount);
-    chunk->levelOffsets.copyFrom(levelOffsets);
-    std::vector<int> localDirections(K);
-    for (int local = 0; local < K; ++local) localDirections[local] = local;
-    chunk->directions.copyFrom(localDirections);
-    chunk->orders.copyFrom(orders);
+    host.directions.resize(K);
+    for (int local = 0; local < K; ++local) host.directions[local] = local;
+    return host;
+}
+
+std::unique_ptr<DevicePlanChunk> uploadPreparedPlanChunk(HostPlanChunk&& host) {
+    auto chunk = std::make_unique<DevicePlanChunk>();
+    chunk->directionCount = host.directionCount;
+    chunk->maxSweepLevelCount = host.maxSweepLevelCount;
+    chunk->maxSweepLevelWidth = host.maxSweepLevelWidth;
+    chunk->ordinateX.copyFrom(host.ordinateX);
+    chunk->ordinateY.copyFrom(host.ordinateY);
+    chunk->ordinateZ.copyFrom(host.ordinateZ);
+    chunk->weights.copyFrom(host.weights);
+    chunk->hasCycle.copyFrom(host.hasCycle);
+    chunk->levelOffsetBase.copyFrom(host.levelOffsetBase);
+    chunk->levelCount.copyFrom(host.levelCount);
+    chunk->levelOffsets.copyFrom(host.levelOffsets);
+    chunk->directions.copyFrom(host.directions);
+    chunk->orders.copyFrom(host.orders);
+    chunk->hostHasCycle = std::move(host.hasCycle);
+    chunk->hostLevelCount = std::move(host.levelCount);
+    chunk->globalDirections = std::move(host.globalDirections);
+    return chunk;
+}
+
+std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
+    const Mesh& mesh,
+    const std::vector<Ordinate>& ordinates,
+    const TransportSweep& sweep,
+    const std::vector<int>& globalDirections
+) {
+    HostPlanChunk host = preparePlanChunkHost(mesh, ordinates, sweep, globalDirections);
+    std::unique_ptr<DevicePlanChunk> chunk = uploadPreparedPlanChunk(std::move(host));
     return chunk;
 }
 
@@ -2038,6 +2093,32 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         std::vector<std::unique_ptr<DevicePlanChunk>> siDevicePlanCache(
             siDirectionChunks.size()
         );
+        std::vector<std::size_t> siDevicePlanCacheChunkBytes(siDirectionChunks.size(), 0);
+        std::vector<double> siDevicePlanCacheScore(siDirectionChunks.size(), 0.0);
+        std::size_t siDevicePlanCacheHits = 0;
+        std::size_t siDevicePlanCacheMisses = 0;
+        const bool useSIPlanCostAdmission =
+            envFlagEnabled("RSI_CUDA_SI_PLAN_COST_ADMISSION", false);
+        const bool useSIPlanPrefetch =
+            envFlagEnabled("RSI_CUDA_SI_PLAN_PREFETCH", false);
+        std::future<HostPlanChunk> siPrefetchFuture;
+        std::size_t siPrefetchIndex = siDirectionChunks.size();
+        auto scheduleSIPrefetch = [&](std::size_t beginIndex) {
+            if (!useSIPlanPrefetch || siPrefetchFuture.valid()) return;
+            for (std::size_t index = beginIndex; index < siDirectionChunks.size(); ++index) {
+                if (siDevicePlanCache[index]) continue;
+                siPrefetchIndex = index;
+                siPrefetchFuture = std::async(
+                    std::launch::async,
+                    [&mesh, &ordinates, &sweep, &siDirectionChunks, index] {
+                        return preparePlanChunkHost(
+                            mesh, ordinates, sweep, siDirectionChunks[index]
+                        );
+                    }
+                );
+                return;
+            }
+        };
         DeviceArray<double> angularPsi, phiA, phiB, normValues;
         angularPsi.allocate(angularValueCount);
         phiA.allocate(C);
@@ -2062,25 +2143,71 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                 const auto planStart = std::chrono::steady_clock::now();
                 std::unique_ptr<DevicePlanChunk> temporaryChunk;
                 DevicePlanChunk* chunk = siDevicePlanCache[chunkIndex].get();
-                if (!chunk) {
-                    temporaryChunk =
-                        uploadPlanChunk(mesh, ordinates, sweep, siDirectionChunks[chunkIndex]);
+                if (chunk) {
+                    ++siDevicePlanCacheHits;
+                } else {
+                    ++siDevicePlanCacheMisses;
+                    HostPlanChunk hostChunk;
+                    if (siPrefetchFuture.valid() && siPrefetchIndex == chunkIndex) {
+                        hostChunk = siPrefetchFuture.get();
+                        siPrefetchIndex = siDirectionChunks.size();
+                    } else {
+                        hostChunk = preparePlanChunkHost(
+                            mesh, ordinates, sweep, siDirectionChunks[chunkIndex]
+                        );
+                    }
+                    temporaryChunk = uploadPreparedPlanChunk(std::move(hostChunk));
                     checkCuda(
                         cudaDeviceSynchronize(),
                         "synchronize streaming CUDA SI plan upload"
                     );
                     const std::size_t chunkBytes =
                         estimateDevicePlanChunkBytes(*temporaryChunk, C);
+                    const double planElapsed =
+                        secondsBetween(planStart, std::chrono::steady_clock::now());
                     if (siDevicePlanCacheBudget > 0 &&
-                        siDevicePlanCacheBytes + chunkBytes <= siDevicePlanCacheBudget) {
+                        chunkBytes <= siDevicePlanCacheBudget &&
+                        iteration == 1 &&
+                        useSIPlanCostAdmission) {
+                        while (siDevicePlanCacheBytes + chunkBytes >
+                               siDevicePlanCacheBudget) {
+                            std::size_t victim = siDevicePlanCache.size();
+                            double victimScore = planElapsed;
+                            for (std::size_t candidate = 0;
+                                 candidate < siDevicePlanCache.size(); ++candidate) {
+                                if (!siDevicePlanCache[candidate]) continue;
+                                if (siDevicePlanCacheScore[candidate] < victimScore) {
+                                    victim = candidate;
+                                    victimScore = siDevicePlanCacheScore[candidate];
+                                }
+                            }
+                            if (victim == siDevicePlanCache.size()) break;
+                            siDevicePlanCache[victim].reset();
+                            siDevicePlanCacheBytes -= siDevicePlanCacheChunkBytes[victim];
+                            siDevicePlanCacheChunkBytes[victim] = 0;
+                            siDevicePlanCacheScore[victim] = 0.0;
+                        }
+                        if (siDevicePlanCacheBytes + chunkBytes <=
+                            siDevicePlanCacheBudget) {
+                            siDevicePlanCacheBytes += chunkBytes;
+                            siDevicePlanCacheChunkBytes[chunkIndex] = chunkBytes;
+                            siDevicePlanCacheScore[chunkIndex] = planElapsed;
+                            siDevicePlanCache[chunkIndex] = std::move(temporaryChunk);
+                            chunk = siDevicePlanCache[chunkIndex].get();
+                        }
+                    } else if (siDevicePlanCacheBudget > 0 &&
+                               siDevicePlanCacheBytes + chunkBytes <=
+                               siDevicePlanCacheBudget) {
                         siDevicePlanCacheBytes += chunkBytes;
+                        siDevicePlanCacheChunkBytes[chunkIndex] = chunkBytes;
+                        siDevicePlanCacheScore[chunkIndex] = planElapsed;
                         siDevicePlanCache[chunkIndex] = std::move(temporaryChunk);
                         chunk = siDevicePlanCache[chunkIndex].get();
-                    } else {
-                        chunk = temporaryChunk.get();
                     }
+                    if (!chunk) chunk = temporaryChunk.get();
                 }
                 siPlanSeconds += secondsBetween(planStart, std::chrono::steady_clock::now());
+                scheduleSIPrefetch(chunkIndex + 1);
 
                 const int K = chunk->directionCount;
                 const int siLevelTileCount = std::max(
@@ -2228,6 +2355,15 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                   "copy streaming CUDA SI result");
         siCopySeconds += secondsBetween(siCopyStart, std::chrono::steady_clock::now());
         siTotalSeconds = secondsBetween(siStart, std::chrono::steady_clock::now());
+        std::size_t siDevicePlanCachedChunks = 0;
+        for (const auto& cachedChunk : siDevicePlanCache) {
+            if (cachedChunk) ++siDevicePlanCachedChunks;
+        }
+        std::cerr << "CUDA streaming SI device plan cache: chunks="
+                  << siDevicePlanCachedChunks << "/" << siDirectionChunks.size()
+                  << ", bytes=" << siDevicePlanCacheBytes
+                  << ", hits=" << siDevicePlanCacheHits
+                  << ", misses=" << siDevicePlanCacheMisses << "\n";
     }
 
     const auto rsiStart = std::chrono::steady_clock::now();
