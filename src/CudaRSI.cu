@@ -1015,6 +1015,45 @@ std::unique_ptr<DeviceStaticProblem> uploadStaticProblem(
     return problem;
 }
 
+std::vector<SweepPlan> buildSweepPlansParallel(
+    const std::vector<Ordinate>& ordinates,
+    const TransportSweep& sweep,
+    const std::vector<int>& globalDirections
+) {
+    const int K = static_cast<int>(globalDirections.size());
+    std::vector<SweepPlan> plans(K);
+    std::atomic<int> next{0};
+    std::exception_ptr workerError;
+    std::mutex errorMutex;
+    const unsigned workerCount = std::max(
+        1u,
+        std::min<unsigned>(
+            static_cast<unsigned>(K),
+            std::thread::hardware_concurrency()
+        )
+    );
+    std::vector<std::thread> workers;
+    workers.reserve(workerCount);
+    for (unsigned worker = 0; worker < workerCount; ++worker) {
+        workers.emplace_back([&] {
+            try {
+                while (true) {
+                    const int local = next.fetch_add(1);
+                    if (local >= K) break;
+                    const int global = globalDirections[local];
+                    plans[local] = sweep.buildSweepPlan(ordinates[global].omega);
+                }
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(errorMutex);
+                if (!workerError) workerError = std::current_exception();
+            }
+        });
+    }
+    for (std::thread& worker : workers) worker.join();
+    if (workerError) std::rethrow_exception(workerError);
+    return plans;
+}
+
 std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
     const Mesh& mesh,
     const std::vector<Ordinate>& ordinates,
@@ -1048,37 +1087,60 @@ std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
         );
     }
     if (!loadedFromCache) {
-        localPlans.resize(K);
-        std::atomic<int> next{0};
-        std::exception_ptr workerError;
-        std::mutex errorMutex;
-        const unsigned workerCount = std::max(
-            1u,
-            std::min<unsigned>(
-                static_cast<unsigned>(K),
-                std::thread::hardware_concurrency()
-            )
-        );
-        std::vector<std::thread> workers;
-        workers.reserve(workerCount);
-        for (unsigned worker = 0; worker < workerCount; ++worker) {
-            workers.emplace_back([&] {
-                try {
-                    while (true) {
-                        const int local = next.fetch_add(1);
-                        if (local >= K) break;
-                        const int global = globalDirections[local];
-                        localPlans[local] =
-                            sweep.buildSweepPlan(ordinates[global].omega);
+        const bool useFixedChunkReuse =
+            sweepPlanChunkCacheEnabled() &&
+            envFlagEnabled("RSI_CUDA_FIXED_PLAN_CHUNK_REUSE", true) &&
+            K > maxCachedChunkDirections;
+        if (useFixedChunkReuse) {
+            const int fixedChunkSize =
+                envIntValue("RSI_CUDA_FIXED_PLAN_CHUNK", 1, 1, 4096);
+            const int M = static_cast<int>(ordinates.size());
+            std::vector<int> requestedLocal(M, -1);
+            for (int local = 0; local < K; ++local) {
+                requestedLocal[globalDirections[local]] = local;
+            }
+            localPlans.resize(K);
+            for (int chunkStart = 0; chunkStart < M; chunkStart += fixedChunkSize) {
+                const int chunkEnd = std::min(chunkStart + fixedChunkSize, M);
+                bool needed = false;
+                for (int global = chunkStart; global < chunkEnd; ++global) {
+                    if (requestedLocal[global] >= 0) {
+                        needed = true;
+                        break;
                     }
-                } catch (...) {
-                    std::lock_guard<std::mutex> lock(errorMutex);
-                    if (!workerError) workerError = std::current_exception();
                 }
-            });
+                if (!needed) continue;
+
+                std::vector<int> fixedDirections;
+                fixedDirections.reserve(chunkEnd - chunkStart);
+                for (int global = chunkStart; global < chunkEnd; ++global) {
+                    fixedDirections.push_back(global);
+                }
+                const std::uint64_t fixedKey =
+                    sweepPlanChunkCacheKey(mesh, ordinates, fixedDirections);
+                const std::string fixedPath = sweepPlanChunkCachePath(fixedKey);
+                std::vector<SweepPlan> fixedPlans;
+                bool fixedLoaded = tryLoadSweepPlanChunkCache(
+                    fixedPath, fixedKey, fixedDirections.size(), mesh.cells.size(), fixedPlans
+                );
+                if (!fixedLoaded) {
+                    fixedPlans = buildSweepPlansParallel(ordinates, sweep, fixedDirections);
+                    if (static_cast<int>(fixedDirections.size()) <= maxCachedChunkDirections) {
+                        saveSweepPlanChunkCache(
+                            fixedPath, fixedKey, fixedDirections.size(),
+                            mesh.cells.size(), fixedPlans
+                        );
+                    }
+                }
+                for (int global = chunkStart; global < chunkEnd; ++global) {
+                    const int local = requestedLocal[global];
+                    if (local < 0) continue;
+                    localPlans[local] = fixedPlans[global - chunkStart];
+                }
+            }
+        } else {
+            localPlans = buildSweepPlansParallel(ordinates, sweep, globalDirections);
         }
-        for (std::thread& worker : workers) worker.join();
-        if (workerError) std::rethrow_exception(workerError);
     }
     for (int local = 0; local < K; ++local) {
         const int global = globalDirections[local];

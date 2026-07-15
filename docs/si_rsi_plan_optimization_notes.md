@@ -30,6 +30,7 @@
    - 复用 `RSI_SWEEP_PLAN_CACHE_DIR` 目录设置。
    - 默认只缓存 `K <= 256` 的 chunk，避免 RSI 大 unique-direction chunk 生成大量一次性 cache 文件。
    - 可用 `RSI_CUDA_MAX_CACHED_PLAN_CHUNK` 调整缓存方向数上限。
+   - RSI 大 unique-direction chunk 会按固定 cache chunk 拆分复用；默认 `RSI_CUDA_FIXED_PLAN_CHUNK=1`，即单方向 plan cache。
 
 5. streaming-plan 触发阈值：
    - 默认阈值为 8 GiB。
@@ -80,23 +81,29 @@
 
 当前 RSI 每个 sample batch 会收集约 `2800` 个 unique directions，并为这批方向构建 compact plan。不同 batch 的 unique direction 集合不同，因此当前不缓存 `K > 256` 的大 chunk，导致 `rsi_plan` 仍为主要瓶颈。
 
-建议改为固定方向 chunk：
+已实现固定方向 chunk 复用：
 
 ```text
-S128 directions -> 130 chunks * 128 directions
+RSI_CUDA_FIXED_PLAN_CHUNK=1  # default
 ```
 
-每个 RSI batch 不再构建一个大 compact plan，而是按固定 chunk 组织 selected directions。这样所有 batch 可复用同一套 chunk cache。
+默认用单方向 cache，是因为 S128/8192 中每个 RSI batch 的随机 unique directions 约为 2800 个，几乎覆盖所有 128-direction fixed chunks。若 fixed chunk 过大，会读取大量当前 batch 未使用的方向 plan。
 
 预期收益：
 
-- 避免每个 RSI batch 重建约 2800 个方向的 plan。
-- 将 `rsi_plan` 从千秒级降到主要由 chunk 读取/上传和调度决定。
+- 每个方向最多构建一次 plan。
+- 后续 batch 复用已缓存的单方向 plan。
+- 将 `rsi_plan` 从千秒级降到主要由实际所需方向的 cache 读取/上传决定。
 
 主要代价：
 
-- 需要按 iteration/sample 的 selected directions 重排或分组。
-- 每个 iteration 可能跨多个 fixed chunk，kernel launch 数会增加。
+- cache 文件数量会增加，S128 最多约 16640 个单方向 cache 文件。
+- 小文件 IO 可能成为新瓶颈，后续可合并为 shard cache。
+
+验证状态：
+
+- `make test-gpu` 已通过。
+- 200k/S128 小样本性能实测待 GPU 空闲后补充。
 
 ### 2. Host 内存 LRU cache
 
