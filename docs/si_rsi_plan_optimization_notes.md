@@ -414,8 +414,31 @@ SI packed host plan cache 实测：
   - host cache：`25/130` chunks，hits `313`，misses `142`
   - 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
   - 对比 fused default 输出，SI/RSI/RSI-tail 逐值 `max_abs = 0`。
-- 结论：temporary buffer reuse 小幅降低 upload（约 `14.64 s -> 13.96 s`），但本轮 cache 波动使端到端没有改善；保留该实现，因为它降低了分配抖动且不改变数值。
-- 下一步如果继续压 upload，更可能需要 pinned host memory 和 async H2D；这需要重构 host buffer 生命周期和 CUDA stream 管理，暂不默认做。
+- 已增加 opt-in async/pinned H2D 上传实验：
+  - `RSI_CUDA_SI_ASYNC_PLAN_UPLOAD=1`：SI plan upload 使用独立 non-blocking stream 和 `cudaMemcpyAsync`。
+  - `RSI_CUDA_SI_PINNED_PLAN_UPLOAD=1`：额外使用按字段复用的 pinned staging buffer；该开关隐含 async upload。
+  - 默认不打开，避免 pinned staging 的额外 host memcpy 在小 case 上造成回归。
+- `200k + S128 + 16 samples`，async pageable：
+  - 输出目录：`results/fig5_200k_s128_16_async_upload/Cir/`
+  - CUDA internal total：`79.2904 s`
+  - `si_plan = 38.4207 s`
+  - `si_sweep = 39.0833 s`
+  - `si_plan_breakdown_cache = 20.7049 s`
+  - `si_plan_breakdown_pack = 0.938031 s`
+  - `si_plan_breakdown_upload = 13.4927 s`
+  - `si_plan_breakdown_sync = 0.23149 s`
+- `200k + S128 + 16 samples`，pinned + async：
+  - 输出目录：`results/fig5_200k_s128_16_pinned_async_upload/Cir/`
+  - CUDA internal total：`76.4191 s`
+  - `si_plan = 36.0273 s`
+  - `si_sweep = 38.0049 s`
+  - `si_plan_breakdown_cache = 15.8255 s`
+  - `si_plan_breakdown_pack = 0.942491 s`
+  - `si_plan_breakdown_upload = 3.21 s`
+  - `si_plan_breakdown_sync = 12.8462 s`
+  - 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+  - 对比 async pageable 和 fused default 输出，SI/RSI/RSI-tail 逐值 `max_abs = 0`。
+- 结论：pinned+async 把大部分 H2D 等待从 `upload` 迁到 stream sync，但 `si_plan` 仍比 async pageable 低约 `2.4 s`，比 temporary buffer reuse run 低约 `7.6 s`；先保留为 opt-in，后续需要在完整 `8192 samples` 上确认端到端收益和稳定性。
 - 压缩 `orders` 对磁盘 cache 可能有帮助，但 200k cell 无法用 `uint16`，GPU 端压缩还需要解码 kernel，风险较高，暂只记录。
 
 ### 9. SI sweep breakdown

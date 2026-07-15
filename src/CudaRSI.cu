@@ -69,6 +69,47 @@ struct CudaEventTimer {
     }
 };
 
+struct CudaStream {
+    cudaStream_t stream = nullptr;
+
+    explicit CudaStream(unsigned int flags = cudaStreamNonBlocking) {
+        checkCuda(cudaStreamCreateWithFlags(&stream, flags), "create CUDA stream");
+    }
+    CudaStream(const CudaStream&) = delete;
+    CudaStream& operator=(const CudaStream&) = delete;
+    ~CudaStream() {
+        if (stream) cudaStreamDestroy(stream);
+    }
+};
+
+template <typename T>
+struct PinnedHostBuffer {
+    T* ptr = nullptr;
+    std::size_t capacity = 0;
+
+    PinnedHostBuffer() = default;
+    PinnedHostBuffer(const PinnedHostBuffer&) = delete;
+    PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
+    ~PinnedHostBuffer() {
+        if (ptr) cudaFreeHost(ptr);
+    }
+
+    void allocate(std::size_t count) {
+        if (count == 0) return;
+        if (ptr && capacity >= count) return;
+        if (ptr) {
+            cudaFreeHost(ptr);
+            ptr = nullptr;
+            capacity = 0;
+        }
+        checkCuda(
+            cudaMallocHost(reinterpret_cast<void**>(&ptr), count * sizeof(T)),
+            "cudaMallocHost"
+        );
+        capacity = count;
+    }
+};
+
 template <typename T>
 struct DeviceArray {
     T* ptr = nullptr;
@@ -113,6 +154,36 @@ struct DeviceArray {
         checkCuda(
             cudaMemcpy(ptr, values.data(), values.size() * sizeof(T), cudaMemcpyHostToDevice),
             "cudaMemcpy host to device"
+        );
+    }
+
+    void copyFromAsync(const std::vector<T>& values, cudaStream_t stream) {
+        if (values.empty()) return;
+        allocate(values.size());
+        checkCuda(
+            cudaMemcpyAsync(
+                ptr, values.data(), values.size() * sizeof(T),
+                cudaMemcpyHostToDevice, stream
+            ),
+            "cudaMemcpyAsync host to device"
+        );
+    }
+
+    void copyFromPinnedAsync(
+        const std::vector<T>& values,
+        PinnedHostBuffer<T>& staging,
+        cudaStream_t stream
+    ) {
+        if (values.empty()) return;
+        allocate(values.size());
+        staging.allocate(values.size());
+        std::copy(values.begin(), values.end(), staging.ptr);
+        checkCuda(
+            cudaMemcpyAsync(
+                ptr, staging.ptr, values.size() * sizeof(T),
+                cudaMemcpyHostToDevice, stream
+            ),
+            "cudaMemcpyAsync pinned host to device"
         );
     }
 };
@@ -745,6 +816,19 @@ struct HostPlanChunk {
     std::vector<double> ordinateZ;
     std::vector<double> weights;
     std::vector<int> orders;
+};
+
+struct PlanUploadPinnedStaging {
+    PinnedHostBuffer<unsigned char> hasCycle;
+    PinnedHostBuffer<int> levelOffsetBase;
+    PinnedHostBuffer<int> levelCount;
+    PinnedHostBuffer<int> levelOffsets;
+    PinnedHostBuffer<int> directions;
+    PinnedHostBuffer<double> ordinateX;
+    PinnedHostBuffer<double> ordinateY;
+    PinnedHostBuffer<double> ordinateZ;
+    PinnedHostBuffer<double> weights;
+    PinnedHostBuffer<int> orders;
 };
 
 struct PlanChunkTiming {
@@ -1533,22 +1617,64 @@ HostPlanChunk preparePlanChunkHost(
 void uploadPreparedPlanChunkInto(
     HostPlanChunk&& host,
     DevicePlanChunk& chunk,
-    PlanChunkTiming* timing = nullptr
+    PlanChunkTiming* timing = nullptr,
+    cudaStream_t uploadStream = nullptr,
+    PlanUploadPinnedStaging* pinnedStaging = nullptr
 ) {
     const auto uploadStart = std::chrono::steady_clock::now();
     chunk.directionCount = host.directionCount;
     chunk.maxSweepLevelCount = host.maxSweepLevelCount;
     chunk.maxSweepLevelWidth = host.maxSweepLevelWidth;
-    chunk.ordinateX.copyFrom(host.ordinateX);
-    chunk.ordinateY.copyFrom(host.ordinateY);
-    chunk.ordinateZ.copyFrom(host.ordinateZ);
-    chunk.weights.copyFrom(host.weights);
-    chunk.hasCycle.copyFrom(host.hasCycle);
-    chunk.levelOffsetBase.copyFrom(host.levelOffsetBase);
-    chunk.levelCount.copyFrom(host.levelCount);
-    chunk.levelOffsets.copyFrom(host.levelOffsets);
-    chunk.directions.copyFrom(host.directions);
-    chunk.orders.copyFrom(host.orders);
+    if (uploadStream && pinnedStaging) {
+        chunk.ordinateX.copyFromPinnedAsync(
+            host.ordinateX, pinnedStaging->ordinateX, uploadStream
+        );
+        chunk.ordinateY.copyFromPinnedAsync(
+            host.ordinateY, pinnedStaging->ordinateY, uploadStream
+        );
+        chunk.ordinateZ.copyFromPinnedAsync(
+            host.ordinateZ, pinnedStaging->ordinateZ, uploadStream
+        );
+        chunk.weights.copyFromPinnedAsync(host.weights, pinnedStaging->weights, uploadStream);
+        chunk.hasCycle.copyFromPinnedAsync(
+            host.hasCycle, pinnedStaging->hasCycle, uploadStream
+        );
+        chunk.levelOffsetBase.copyFromPinnedAsync(
+            host.levelOffsetBase, pinnedStaging->levelOffsetBase, uploadStream
+        );
+        chunk.levelCount.copyFromPinnedAsync(
+            host.levelCount, pinnedStaging->levelCount, uploadStream
+        );
+        chunk.levelOffsets.copyFromPinnedAsync(
+            host.levelOffsets, pinnedStaging->levelOffsets, uploadStream
+        );
+        chunk.directions.copyFromPinnedAsync(
+            host.directions, pinnedStaging->directions, uploadStream
+        );
+        chunk.orders.copyFromPinnedAsync(host.orders, pinnedStaging->orders, uploadStream);
+    } else if (uploadStream) {
+        chunk.ordinateX.copyFromAsync(host.ordinateX, uploadStream);
+        chunk.ordinateY.copyFromAsync(host.ordinateY, uploadStream);
+        chunk.ordinateZ.copyFromAsync(host.ordinateZ, uploadStream);
+        chunk.weights.copyFromAsync(host.weights, uploadStream);
+        chunk.hasCycle.copyFromAsync(host.hasCycle, uploadStream);
+        chunk.levelOffsetBase.copyFromAsync(host.levelOffsetBase, uploadStream);
+        chunk.levelCount.copyFromAsync(host.levelCount, uploadStream);
+        chunk.levelOffsets.copyFromAsync(host.levelOffsets, uploadStream);
+        chunk.directions.copyFromAsync(host.directions, uploadStream);
+        chunk.orders.copyFromAsync(host.orders, uploadStream);
+    } else {
+        chunk.ordinateX.copyFrom(host.ordinateX);
+        chunk.ordinateY.copyFrom(host.ordinateY);
+        chunk.ordinateZ.copyFrom(host.ordinateZ);
+        chunk.weights.copyFrom(host.weights);
+        chunk.hasCycle.copyFrom(host.hasCycle);
+        chunk.levelOffsetBase.copyFrom(host.levelOffsetBase);
+        chunk.levelCount.copyFrom(host.levelCount);
+        chunk.levelOffsets.copyFrom(host.levelOffsets);
+        chunk.directions.copyFrom(host.directions);
+        chunk.orders.copyFrom(host.orders);
+    }
     chunk.hostHasCycle = std::move(host.hasCycle);
     chunk.hostLevelCount = std::move(host.levelCount);
     chunk.globalDirections = std::move(host.globalDirections);
@@ -2336,6 +2462,16 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
             envFlagEnabled("RSI_CUDA_SI_PLAN_COST_ADMISSION", true);
         const bool useSIPlanPrefetch =
             envFlagEnabled("RSI_CUDA_SI_PLAN_PREFETCH", false);
+        const bool useSIPinnedPlanUpload =
+            envFlagEnabled("RSI_CUDA_SI_PINNED_PLAN_UPLOAD", false);
+        const bool useSIAsyncPlanUpload =
+            useSIPinnedPlanUpload ||
+            envFlagEnabled("RSI_CUDA_SI_ASYNC_PLAN_UPLOAD", false);
+        std::unique_ptr<CudaStream> siPlanUploadStream;
+        if (useSIAsyncPlanUpload) {
+            siPlanUploadStream = std::make_unique<CudaStream>();
+        }
+        PlanUploadPinnedStaging siPlanUploadStaging;
         std::future<HostPlanChunk> siPrefetchFuture;
         std::size_t siPrefetchIndex = siDirectionChunks.size();
         auto scheduleSIPrefetch = [&](std::size_t beginIndex) {
@@ -2462,18 +2598,29 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                     if (admitDeviceCache) {
                         temporaryChunk = std::make_unique<DevicePlanChunk>();
                         uploadPreparedPlanChunkInto(
-                            std::move(hostChunk), *temporaryChunk, &chunkPlanTiming
+                            std::move(hostChunk), *temporaryChunk, &chunkPlanTiming,
+                            siPlanUploadStream ? siPlanUploadStream->stream : nullptr,
+                            useSIPinnedPlanUpload ? &siPlanUploadStaging : nullptr
                         );
                     } else {
                         uploadPreparedPlanChunkInto(
-                            std::move(hostChunk), siTemporaryPlanChunk, &chunkPlanTiming
+                            std::move(hostChunk), siTemporaryPlanChunk, &chunkPlanTiming,
+                            siPlanUploadStream ? siPlanUploadStream->stream : nullptr,
+                            useSIPinnedPlanUpload ? &siPlanUploadStaging : nullptr
                         );
                     }
                     const auto planSyncStart = std::chrono::steady_clock::now();
-                    checkCuda(
-                        cudaDeviceSynchronize(),
-                        "synchronize streaming CUDA SI plan upload"
-                    );
+                    if (siPlanUploadStream) {
+                        checkCuda(
+                            cudaStreamSynchronize(siPlanUploadStream->stream),
+                            "synchronize streaming CUDA SI plan upload stream"
+                        );
+                    } else {
+                        checkCuda(
+                            cudaDeviceSynchronize(),
+                            "synchronize streaming CUDA SI plan upload"
+                        );
+                    }
                     chunkPlanTiming.syncSeconds += secondsBetween(
                         planSyncStart, std::chrono::steady_clock::now()
                     );
