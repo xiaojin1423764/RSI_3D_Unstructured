@@ -2179,6 +2179,10 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     double siPlanSeconds = 0.0;
     double siClearSeconds = 0.0;
     double siSweepSeconds = 0.0;
+    double siSweepAngularClearSeconds = 0.0;
+    double siSweepKernelSeconds = 0.0;
+    double siSweepAccumulateSeconds = 0.0;
+    double siSweepSyncSeconds = 0.0;
     double siReduceSeconds = 0.0;
     double siNormSeconds = 0.0;
     double siCopySeconds = 0.0;
@@ -2212,7 +2216,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         std::size_t siDevicePlanCacheHits = 0;
         std::size_t siDevicePlanCacheMisses = 0;
         const bool useSIPlanCostAdmission =
-            envFlagEnabled("RSI_CUDA_SI_PLAN_COST_ADMISSION", false);
+            envFlagEnabled("RSI_CUDA_SI_PLAN_COST_ADMISSION", true);
         const bool useSIPlanPrefetch =
             envFlagEnabled("RSI_CUDA_SI_PLAN_PREFETCH", false);
         std::future<HostPlanChunk> siPrefetchFuture;
@@ -2248,6 +2252,9 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         const bool useSIWavefront = envFlagEnabled("RSI_CUDA_SI_WAVEFRONT", true);
         const bool useSITiledWavefront =
             envFlagEnabled("RSI_CUDA_SI_TILED_WAVEFRONT", true);
+        const bool useSISweepBreakdown =
+            envFlagEnabled("RSI_CUDA_SI_SWEEP_BREAKDOWN", false);
+        CudaEventTimer siSweepBreakdownTimer;
         for (int iteration = 1; iteration <= maxSIters; ++iteration) {
             gpuTimer.start();
             checkCuda(cudaMemset(currentPhi, 0, static_cast<std::size_t>(C) * sizeof(double)),
@@ -2297,6 +2304,12 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         estimateDevicePlanChunkBytes(*temporaryChunk, C);
                     const double planElapsed =
                         secondsBetween(planStart, std::chrono::steady_clock::now());
+                    const double planAdmissionScore =
+                        chunkPlanTiming.cacheSeconds +
+                        chunkPlanTiming.buildSeconds +
+                        chunkPlanTiming.packSeconds +
+                        chunkPlanTiming.uploadSeconds +
+                        chunkPlanTiming.syncSeconds;
                     if (siDevicePlanCacheBudget > 0 &&
                         chunkBytes <= siDevicePlanCacheBudget &&
                         iteration == 1 &&
@@ -2304,7 +2317,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         while (siDevicePlanCacheBytes + chunkBytes >
                                siDevicePlanCacheBudget) {
                             std::size_t victim = siDevicePlanCache.size();
-                            double victimScore = planElapsed;
+                            double victimScore = planAdmissionScore;
                             for (std::size_t candidate = 0;
                                  candidate < siDevicePlanCache.size(); ++candidate) {
                                 if (!siDevicePlanCache[candidate]) continue;
@@ -2323,7 +2336,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                             siDevicePlanCacheBudget) {
                             siDevicePlanCacheBytes += chunkBytes;
                             siDevicePlanCacheChunkBytes[chunkIndex] = chunkBytes;
-                            siDevicePlanCacheScore[chunkIndex] = planElapsed;
+                            siDevicePlanCacheScore[chunkIndex] = planAdmissionScore;
                             siDevicePlanCache[chunkIndex] = std::move(temporaryChunk);
                             chunk = siDevicePlanCache[chunkIndex].get();
                         }
@@ -2332,7 +2345,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                                siDevicePlanCacheBudget) {
                         siDevicePlanCacheBytes += chunkBytes;
                         siDevicePlanCacheChunkBytes[chunkIndex] = chunkBytes;
-                        siDevicePlanCacheScore[chunkIndex] = planElapsed;
+                        siDevicePlanCacheScore[chunkIndex] = planAdmissionScore;
                         siDevicePlanCache[chunkIndex] = std::move(temporaryChunk);
                         chunk = siDevicePlanCache[chunkIndex].get();
                     }
@@ -2352,11 +2365,18 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         chunk->hostHasCycle, localStart, K
                     );
                     const int directionBatch = localEnd - localStart;
+                    if (useSISweepBreakdown) siSweepBreakdownTimer.start();
                     checkCuda(cudaMemset(
                                   angularPsi.ptr, 0,
                                   static_cast<std::size_t>(directionBatch) * C * sizeof(double)
                               ),
                               "clear streaming CUDA SI angular batch");
+                    if (useSISweepBreakdown) {
+                        siSweepAngularClearSeconds += siSweepBreakdownTimer.stop(
+                            "time streaming CUDA SI angular clear"
+                        );
+                        siSweepBreakdownTimer.start();
+                    }
                     if (useSIWavefront && chunk->hostHasCycle[localStart] == 0) {
                         int maxLevelCount = 0;
                         for (int local = localStart; local < localEnd; ++local) {
@@ -2430,6 +2450,12 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                             checkCuda(cudaGetLastError(), "launch streaming CUDA SI sweep");
                         }
                     }
+                    if (useSISweepBreakdown) {
+                        siSweepKernelSeconds += siSweepBreakdownTimer.stop(
+                            "time streaming CUDA SI sweep kernels"
+                        );
+                        siSweepBreakdownTimer.start();
+                    }
                     accumulateDirectionBatchKernel<<<cellBlocks, reductionThreads>>>(
                         angularPsi.ptr,
                         chunk->weights.ptr,
@@ -2439,9 +2465,20 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         currentPhi
                     );
                     checkCuda(cudaGetLastError(), "accumulate streaming CUDA SI batch");
+                    if (useSISweepBreakdown) {
+                        siSweepAccumulateSeconds += siSweepBreakdownTimer.stop(
+                            "time streaming CUDA SI accumulate"
+                        );
+                    }
                     localStart = localEnd;
                 }
+                const auto siSweepSyncStart = std::chrono::steady_clock::now();
                 checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA SI chunk");
+                if (useSISweepBreakdown) {
+                    siSweepSyncSeconds += secondsBetween(
+                        siSweepSyncStart, std::chrono::steady_clock::now()
+                    );
+                }
                 siSweepSeconds += gpuTimer.stop("time streaming CUDA SI chunk sweeps");
             }
 
@@ -2773,6 +2810,12 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
               << ", si_reduce=" << siReduceSeconds
               << ", si_norm=" << siNormSeconds
               << ", si_copy=" << siCopySeconds << "\n";
+    std::cout << "CUDA streaming timing: si_sweep_breakdown_angular_clear="
+              << siSweepAngularClearSeconds
+              << ", si_sweep_breakdown_kernel=" << siSweepKernelSeconds
+              << ", si_sweep_breakdown_accumulate=" << siSweepAccumulateSeconds
+              << ", si_sweep_breakdown_sync=" << siSweepSyncSeconds
+              << "\n";
     std::cout << "CUDA streaming timing: si_plan_breakdown_key="
               << siPlanBreakdown.keySeconds
               << ", si_plan_breakdown_cache=" << siPlanBreakdown.cacheSeconds

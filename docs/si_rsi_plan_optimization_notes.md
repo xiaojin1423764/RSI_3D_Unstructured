@@ -46,8 +46,8 @@
    - 默认 `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=8192`。
    - 可设为 `0` 关闭，或设为 `4096` 降低显存占用。
    - 已输出常驻 chunk 数、device bytes、hit/miss 统计。
-   - 已预留按首轮 plan 耗时选择常驻 chunk：`RSI_CUDA_SI_PLAN_COST_ADMISSION=1`。
-   - 已预留 SI host plan 异步预取：`RSI_CUDA_SI_PLAN_PREFETCH=1`。
+   - 默认启用按首轮 plan 成本选择常驻 chunk：`RSI_CUDA_SI_PLAN_COST_ADMISSION=1`。
+   - 已预留 SI host plan 异步预取：`RSI_CUDA_SI_PLAN_PREFETCH=1`，但默认关闭。
 
 8. cache 文件目录 shard：
    - 已增加 opt-in 子目录 shard：`RSI_SWEEP_PLAN_CACHE_SHARD_DIRS=1`。
@@ -87,12 +87,12 @@
   - `si_plan = 90.1124 s`
   - `si_sweep = 42.9842 s`
   - 峰值显存约 `13.4 GiB / 16.3 GiB`
-- 继续打开 `RSI_CUDA_SI_PLAN_COST_ADMISSION=1` 和 `RSI_CUDA_SI_PLAN_PREFETCH=1`：
+- 同时打开 `RSI_CUDA_SI_PLAN_COST_ADMISSION=1` 和 `RSI_CUDA_SI_PLAN_PREFETCH=1`：
   - wall time 明显变差，CUDA internal total `320.042 s`
   - `si_plan = 104.569 s`
   - `si_sweep = 173.738 s`
-  - 主要原因是后台 host prefetch 与 GPU sweep 争用 CPU/内存带宽，默认关闭。
-- 默认关闭 cost-admission/prefetch 后的回归：
+  - 主要原因是后台 host prefetch 与 GPU sweep 争用 CPU/内存带宽，因此 prefetch 默认关闭。
+- 默认关闭 prefetch 后的回归：
   - wall time `171.60 s`
   - CUDA internal total `182.778 s`
   - `si_plan = 103.581 s`
@@ -233,7 +233,7 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 
 - 对 RSI fixed-direction chunk 也增加 device 常驻窗口。
 - 输出实际 cached chunk 数和 cache bytes，便于自动调参。
-- 继续保留 `RSI_CUDA_SI_PLAN_COST_ADMISSION` 作为实验开关；当前实测不作为默认。
+- `RSI_CUDA_SI_PLAN_COST_ADMISSION` 默认开启，但 8 GiB 预算下收益很小。
 - 继续保留 `RSI_CUDA_SI_PLAN_PREFETCH` 作为实验开关；当前实测不作为默认。
 
 ### 6. 暂不实施的方向
@@ -355,11 +355,63 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 - 最大项是 host cache 读取/反序列化和 H2D 上传，二者合计约 `49.9 s`。
 - 下一步优先方向应是减少重复 host cache load 和 H2D upload，例如扩大/调整 device plan cache、做 SI host chunk 常驻全覆盖、或把常用 chunk 固定常驻 GPU。
 
+已继续测试 SI device cache 常驻策略：
+
+- `RSI_CUDA_SI_PLAN_COST_ADMISSION=1` 单独开启，8 GiB 预算：
+  - CUDA internal total：`103.318 s`
+  - `si_plan = 56.2432 s`
+  - `si_sweep = 45.0322 s`
+  - cached chunks：`86/130`
+  - 对比顺序常驻收益很小，说明各 chunk plan 成本差异不大。
+- `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=12000`：
+  - cached chunks：`126/130`
+  - `si_plan = 20.6288 s`
+  - `si_sweep = 104.725 s`
+  - CUDA internal total：`126.795 s`
+  - 计划时间下降明显，但显存压力导致 sweep 变慢，不适合作默认。
+- `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=10000`：
+  - cached chunks：`105/130`
+  - `si_plan = 39.851 s`
+  - `si_sweep = 45.3119 s`
+  - CUDA internal total：`87.6393 s`
+  - 当前比 8 GiB 和 12 GiB 都更合适，后续可进一步扫 `9000/10000/11000`。
+
+### 9. SI sweep breakdown
+
+已增加 opt-in sweep 细分开关：
+
+```text
+RSI_CUDA_SI_SWEEP_BREAKDOWN=1
+```
+
+该开关会在 SI sweep 内部插入额外 CUDA event 同步，仅用于定位，不作为默认性能路径。
+
+实测 `200k + S128 + 16 samples`，`RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=10000`：
+
+- 输出目录：`results/fig5_200k_s128_16_si_sweep_breakdown_10gb/Cir/`
+- CUDA internal total：`88.0614 s`
+- `si_total = 85.7364 s`
+- `si_plan = 39.6558 s`
+- `si_sweep = 45.5002 s`
+- `si_sweep_breakdown_angular_clear = 0.559341 s`
+- `si_sweep_breakdown_kernel = 43.6015 s`
+- `si_sweep_breakdown_accumulate = 0.541548 s`
+- `si_sweep_breakdown_sync = 0.0254582 s`
+- 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+
+结论：
+
+- SI sweep 主要耗时在 wavefront/level sweep kernel 本身，约占 `si_sweep` 的 96%。
+- angular buffer 清零和方向累加各约 `0.55 s`，不是当前瓶颈。
+- chunk 末尾同步几乎可以忽略。
+- 下一步若优化 sweep，应看 `sweepLevelTiledKernel` 的访存/并行度/level 调度，而不是 clear/reduce。
+
 ## 当前推荐优先级
 
-1. 针对 SI plan 的 cache load 和 H2D upload 做常驻/复用优化。
-2. 用 SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
-3. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 cache load。
-4. 将 `maxSamplesPerBatch=128` 改为环境变量，测试 `192/256`，减少 full 8192 的 batch 数。
-5. 基于 cache 命中/常驻统计自动选择预算。
-6. SI chunk size 可配置，继续测试 64/128/256。
+1. 针对 `sweepLevelTiledKernel` 做 profiling/优化，当前 SI sweep 主要耗时在 kernel。
+2. 继续扫 SI device cache 预算，重点测试 `9000/10000/11000`，避免 12 GiB 显存压力导致 sweep 退化。
+3. 用 10 GiB SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
+4. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 cache load。
+5. 将 `maxSamplesPerBatch=128` 改为环境变量，测试 `192/256`，减少 full 8192 的 batch 数。
+6. 基于 cache 命中/常驻统计自动选择预算。
+7. SI chunk size 可配置，继续测试 64/128/256。
