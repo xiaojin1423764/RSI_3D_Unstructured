@@ -245,10 +245,57 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 - 对 `orders` 做 GPU 端压缩格式或变长解码。
 - 将 SI chunk cache 合并为单一二进制 shard/index 文件；当前只实现了 opt-in 目录 shard。
 
+### 7. RSI plan 后续优化方案
+
+当前 RSI streaming 每个 batch 约 `2790` 个 unique directions，完整 `8192 samples` 约 `64` 个 batch。已实现 fixed-direction cache，避免重复构建单方向 sweep plan，但每个 batch 仍会重复：
+
+- 收集并排序 unique directions。
+- 从 host/disk cache 读取多个方向 plan。
+- 将 selected directions 组装成 compact `DevicePlanChunk`。
+- pack 大块 `orders` 和 metadata。
+- H2D 上传到 GPU。
+
+优先级：
+
+1. 先拆分 `rsi_plan` 时间占比，确认 cache/load、host pack、H2D upload、sync 各占多少。
+2. 将 `maxSamplesPerBatch=128` 改为环境变量，测试 `192/256`，减少 batch 数和重复 plan 组装次数。
+3. 做 RSI device direction cache，SI 结束后复用释放出的 GPU 显存，常驻部分方向 plan。
+4. 做 RSI 专用 shard cache，减少 per-direction 小文件 open/read 开销。
+5. 评估 pinned host buffer 和 async H2D。
+
+已加 timing 输出：
+
+- `rsi_unique`
+- `rsi_plan_breakdown_key`
+- `rsi_plan_breakdown_cache`
+- `rsi_plan_breakdown_build`
+- `rsi_plan_breakdown_save`
+- `rsi_plan_breakdown_assemble`
+- `rsi_plan_breakdown_pack`
+- `rsi_plan_breakdown_upload`
+- `rsi_plan_breakdown_sync`
+
+初步实测 `200k + S128 + 16 samples`：
+
+- `rsi_plan = 14.2112 s`
+- `rsi_plan_breakdown_key = 12.8007 s`
+- `rsi_plan_breakdown_cache = 0.786519 s`
+- `rsi_plan_breakdown_assemble = 0.0928087 s`
+- `rsi_plan_breakdown_pack = 0.0170146 s`
+- `rsi_plan_breakdown_upload = 0.0883757 s`
+- `rsi_plan_breakdown_build = 0`
+- `rsi_plan_breakdown_save = 0`
+
+结论：
+
+- 当前 RSI plan 的主要瓶颈是 cache key 生成，约占 `rsi_plan` 的 90%。
+- 直接原因是 fixed-direction reuse 会对许多单方向/小 fixed chunk 重复调用 `sweepPlanChunkCacheKey()`，而该函数每次都会 hash 整个 200k mesh。
+- 下一步最优先应把 mesh/ordinates 的 cache key prefix 预计算一次，再对 directions 增量 hash；或为 fixed direction 直接使用预计算 direction cache key。
+
 ## 当前推荐优先级
 
 1. 用 SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
-2. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 `rsi_plan`。
-3. 基于 cache 命中/常驻统计自动选择预算。
-4. SI chunk size 可配置，继续测试 64/128/256。
-5. 磁盘 cache 压缩。
+2. 用 RSI plan breakdown 跑小样本，确认时间占比。
+3. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 `rsi_plan`。
+4. 基于 cache 命中/常驻统计自动选择预算。
+5. SI chunk size 可配置，继续测试 64/128/256。
