@@ -292,10 +292,38 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 - 直接原因是 fixed-direction reuse 会对许多单方向/小 fixed chunk 重复调用 `sweepPlanChunkCacheKey()`，而该函数每次都会 hash 整个 200k mesh。
 - 下一步最优先应把 mesh/ordinates 的 cache key prefix 预计算一次，再对 directions 增量 hash；或为 fixed direction 直接使用预计算 direction cache key。
 
+已实现 cache key mesh prefix 复用：
+
+- 新增 `SweepPlanChunkCacheKeyContext`，按 `directionCount` 缓存已 hash 完的 mesh/cell/face 前缀。
+- 保持原 cache key 字节顺序不变，因此已有 `results/cache` 文件仍可命中。
+- SI chunk 和 RSI fixed-direction chunk 共用同一个 context。
+
+实测 `200k + S128 + 16 samples`：
+
+- 输出目录：`results/fig5_200k_s128_16_rsi_keyprefix/Cir/`
+- CUDA internal total：`108.935 s`
+- `si_total = 107.468 s`
+- `si_plan = 61.2179 s`
+- `si_sweep = 45.3109 s`
+- `rsi_total = 1.16265 s`
+- `rsi_plan = 0.775026 s`
+- `rsi_plan_breakdown_key = 0.108093 s`
+- `rsi_plan_breakdown_cache = 0.421822 s`
+- `rsi_plan_breakdown_assemble = 0.040589 s`
+- `rsi_plan_breakdown_pack = 0.0172718 s`
+- `rsi_plan_breakdown_upload = 0.0883532 s`
+- 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+
+对比上一版：
+
+- `rsi_plan_breakdown_key`: `12.8007 s -> 0.108093 s`，约 `118x`。
+- `rsi_plan`: `14.2112 s -> 0.775026 s`，约 `18.3x`。
+- 当前 RSI plan 的最大剩余项变为 cache load：`0.421822 s`。
+
 ## 当前推荐优先级
 
 1. 用 SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
-2. 用 RSI plan breakdown 跑小样本，确认时间占比。
-3. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 `rsi_plan`。
+2. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 cache load。
+3. 将 `maxSamplesPerBatch=128` 改为环境变量，测试 `192/256`，减少 full 8192 的 batch 数。
 4. 基于 cache 命中/常驻统计自动选择预算。
 5. SI chunk size 可配置，继续测试 64/128/256。

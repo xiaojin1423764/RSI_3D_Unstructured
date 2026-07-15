@@ -826,16 +826,14 @@ std::string sweepPlanChunkCachePath(std::uint64_t key) {
     return shardedPath;
 }
 
-std::uint64_t sweepPlanChunkCacheKey(
+std::uint64_t sweepPlanChunkCacheMeshPrefix(
     const Mesh& mesh,
-    const std::vector<Ordinate>& ordinates,
-    const std::vector<int>& globalDirections
+    std::uint64_t directionCount
 ) {
     std::uint64_t hash = 1469598103934665603ULL;
     hash = fnv1aValueCuda(hash, planChunkCacheVersion);
     const std::uint64_t cellCount = static_cast<std::uint64_t>(mesh.cells.size());
     const std::uint64_t faceCount = static_cast<std::uint64_t>(mesh.faces.size());
-    const std::uint64_t directionCount = static_cast<std::uint64_t>(globalDirections.size());
     hash = fnv1aValueCuda(hash, cellCount);
     hash = fnv1aValueCuda(hash, faceCount);
     hash = fnv1aValueCuda(hash, directionCount);
@@ -862,6 +860,38 @@ std::uint64_t sweepPlanChunkCacheKey(
         hash = fnv1aValueCuda(hash, face.normal.z);
         hash = fnv1aValueCuda(hash, face.area);
     }
+    return hash;
+}
+
+struct SweepPlanChunkCacheKeyContext {
+    const Mesh* mesh = nullptr;
+    std::mutex mutex;
+    std::unordered_map<std::uint64_t, std::uint64_t> meshPrefixByDirectionCount;
+
+    explicit SweepPlanChunkCacheKeyContext(const Mesh& meshRef) : mesh(&meshRef) {}
+
+    std::uint64_t meshPrefix(std::uint64_t directionCount) {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto found = meshPrefixByDirectionCount.find(directionCount);
+        if (found != meshPrefixByDirectionCount.end()) return found->second;
+        const std::uint64_t prefix =
+            sweepPlanChunkCacheMeshPrefix(*mesh, directionCount);
+        meshPrefixByDirectionCount.emplace(directionCount, prefix);
+        return prefix;
+    }
+};
+
+std::uint64_t sweepPlanChunkCacheKey(
+    SweepPlanChunkCacheKeyContext* context,
+    const Mesh& mesh,
+    const std::vector<Ordinate>& ordinates,
+    const std::vector<int>& globalDirections
+) {
+    const std::uint64_t directionCount =
+        static_cast<std::uint64_t>(globalDirections.size());
+    std::uint64_t hash = context && context->mesh == &mesh
+        ? context->meshPrefix(directionCount)
+        : sweepPlanChunkCacheMeshPrefix(mesh, directionCount);
     for (int direction : globalDirections) {
         hash = fnv1aValueCuda(hash, direction);
         const Ordinate& ordinate = ordinates[direction];
@@ -1200,6 +1230,7 @@ HostPlanChunk preparePlanChunkHost(
     const std::vector<Ordinate>& ordinates,
     const TransportSweep& sweep,
     const std::vector<int>& globalDirections,
+    SweepPlanChunkCacheKeyContext* cacheKeyContext = nullptr,
     PlanChunkTiming* timing = nullptr
 ) {
     HostPlanChunk host;
@@ -1223,7 +1254,7 @@ HostPlanChunk preparePlanChunkHost(
     const bool useCache = sweepPlanChunkCacheEnabled() && K <= maxCachedChunkDirections;
     const auto keyStart = std::chrono::steady_clock::now();
     const std::uint64_t cacheKey =
-        sweepPlanChunkCacheKey(mesh, ordinates, globalDirections);
+        sweepPlanChunkCacheKey(cacheKeyContext, mesh, ordinates, globalDirections);
     const std::string cachePath = sweepPlanChunkCachePath(cacheKey);
     if (timing) {
         timing->keySeconds += secondsBetween(keyStart, std::chrono::steady_clock::now());
@@ -1272,7 +1303,7 @@ HostPlanChunk preparePlanChunkHost(
                 }
                 const auto fixedKeyStart = std::chrono::steady_clock::now();
                 const std::uint64_t fixedKey =
-                    sweepPlanChunkCacheKey(mesh, ordinates, fixedDirections);
+                    sweepPlanChunkCacheKey(cacheKeyContext, mesh, ordinates, fixedDirections);
                 const std::string fixedPath = sweepPlanChunkCachePath(fixedKey);
                 if (timing) {
                     timing->keySeconds += secondsBetween(
@@ -1425,10 +1456,11 @@ std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
     const std::vector<Ordinate>& ordinates,
     const TransportSweep& sweep,
     const std::vector<int>& globalDirections,
+    SweepPlanChunkCacheKeyContext* cacheKeyContext = nullptr,
     PlanChunkTiming* timing = nullptr
 ) {
     HostPlanChunk host = preparePlanChunkHost(
-        mesh, ordinates, sweep, globalDirections, timing
+        mesh, ordinates, sweep, globalDirections, cacheKeyContext, timing
     );
     std::unique_ptr<DevicePlanChunk> chunk = uploadPreparedPlanChunk(
         std::move(host), timing
@@ -2139,6 +2171,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     const int cellBlocks = (C + reductionThreads - 1) / reductionThreads;
     const int siDirectionsPerChunk =
         envIntValue("RSI_CUDA_SI_PLAN_CHUNK", 128, 4, 2048);
+    SweepPlanChunkCacheKeyContext cacheKeyContext(mesh);
 
     CudaFigure5Result result;
     CudaEventTimer gpuTimer;
@@ -2190,9 +2223,11 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                 siPrefetchIndex = index;
                 siPrefetchFuture = std::async(
                     std::launch::async,
-                    [&mesh, &ordinates, &sweep, &siDirectionChunks, index] {
+                    [&mesh, &ordinates, &sweep, &siDirectionChunks,
+                     &cacheKeyContext, index] {
                         return preparePlanChunkHost(
-                            mesh, ordinates, sweep, siDirectionChunks[index]
+                            mesh, ordinates, sweep, siDirectionChunks[index],
+                            &cacheKeyContext
                         );
                     }
                 );
@@ -2233,7 +2268,8 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         siPrefetchIndex = siDirectionChunks.size();
                     } else {
                         hostChunk = preparePlanChunkHost(
-                            mesh, ordinates, sweep, siDirectionChunks[chunkIndex]
+                            mesh, ordinates, sweep, siDirectionChunks[chunkIndex],
+                            &cacheKeyContext
                         );
                     }
                     temporaryChunk = uploadPreparedPlanChunk(std::move(hostChunk));
@@ -2522,7 +2558,10 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         const auto planStart = std::chrono::steady_clock::now();
         PlanChunkTiming batchPlanTiming;
         std::unique_ptr<DevicePlanChunk> chunk =
-            uploadPlanChunk(mesh, ordinates, sweep, uniqueDirections, &batchPlanTiming);
+            uploadPlanChunk(
+                mesh, ordinates, sweep, uniqueDirections,
+                &cacheKeyContext, &batchPlanTiming
+            );
         const auto planSyncStart = std::chrono::steady_clock::now();
         checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA RSI plan upload");
         batchPlanTiming.syncSeconds += secondsBetween(
