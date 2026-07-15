@@ -541,6 +541,26 @@ RSI_CUDA_FIXED_PLAN_LOAD_WORKERS=16
 
 结论：当前最有效的 RSI plan 优化是并行化 fixed chunk cache load，而不是扩大 host cache 或默认开启 super-plan。按 1024 samples 线性外推，8192 samples 的端到端时间从原先约 `29 min` 降到约 `5 min` 量级。
 
+下一步验证：
+
+- 已跑 `200k + S128 + 8192 samples` 完整数据，使用 `RSI_CUDA_SI_PINNED_PLAN_UPLOAD=1`，保留默认 `RSI_CUDA_FIXED_PLAN_PARALLEL_LOAD=1`：
+  - 输出目录：`results/fig5_200k_s128_8192_parallel_fixed_load/Cir/`
+  - CUDA internal total：`320.933 s`
+  - `si_total = 69.5556 s`
+  - `si_plan = 32.8526 s`
+  - `si_sweep = 35.668 s`
+  - `rsi_total = 251.159 s`
+  - `rsi_plan = 202.989 s`
+  - `rsi_sweep = 44.3387 s`
+  - `rsi_plan_fixed_cache_chunks = 179338`
+  - `rsi_plan_fixed_cache_hits = 175510`
+  - `rsi_plan_fixed_cache_misses = 3828`
+  - `rsi_plan_fixed_cache_wall = 102.117 s`
+  - `rsi_plan_breakdown_build = 402.421 s`，为 worker 累计时间；miss 会并行 build，因此不要直接和 wall time 相加。
+  - 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+  - SI coarse/fine 对 1024-sample 输出逐值 `max_abs = 0`。
+- 结论：全量端到端约 `5 min 21 s`。8192 下仍有 `3828` 个 fixed chunk misses，说明如果继续优化 RSI plan，应优先做 cache prewarm/补齐或避免 miss 时重复 build，而不是再动 SI。
+
 ### 10. SI sweep breakdown
 
 已增加 opt-in sweep 细分开关：
