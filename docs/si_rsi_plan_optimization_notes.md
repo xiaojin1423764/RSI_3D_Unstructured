@@ -453,16 +453,9 @@ SI packed host plan cache 实测：
 - `rsi_plan_breakdown_cache = 21.4897 s`
 - `rsi_sweep = 5.35741 s`
 
-已实现一个 opt-in RSI super-plan 实验：
+曾实现过 RSI super-plan 实验：先统计整个 RSI run 实际用到的 unique directions，预算允许时一次性 build/upload 一个大 `DevicePlanChunk`，batch 内只映射 global direction 到 super-plan local index。
 
-```text
-RSI_CUDA_RSI_SUPER_PLAN=1
-RSI_CUDA_RSI_SUPER_PLAN_MB=12000
-```
-
-该路径会先统计整个 RSI run 实际用到的 unique directions，预算允许时一次性 build/upload 一个大 `DevicePlanChunk`，batch 内只映射 global direction 到 super-plan local index。为了避免退化成上万个 fixed chunk 查询，super-plan build 会绕过 `RSI_CUDA_FIXED_PLAN_CHUNK_REUSE`。
-
-实测结论：
+实测结论和清理决定：
 
 - `200k + S128 + 256 samples`，super-plan enabled：
   - 输出目录：`results/fig5_200k_s128_256_rsi_superplan/Cir/`
@@ -477,7 +470,7 @@ RSI_CUDA_RSI_SUPER_PLAN_MB=12000
   - `rsi_plan = 10.3915 s`
   - `rsi_plan_breakdown_cache = 7.00688 s`
   - `rsi_plan_breakdown_build = 0`
-- 结论：super-plan 在当前 warm fixed-cache 条件下更慢，不能默认开启；保留为实验开关，只适合 cache cold 且重复 build 严重的情形。
+- 结论：super-plan 在当前 warm fixed-cache 条件下更慢，且增加了额外 plan/mapping 分支；代码已移除，只保留这组数据作为决策记录。
 
 已增加 fixed chunk cache 诊断字段：
 
