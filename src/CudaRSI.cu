@@ -745,6 +745,31 @@ struct PlanChunkTiming {
     double syncSeconds = 0.0;
 };
 
+std::size_t hostPlanChunkBytes(const HostPlanChunk& chunk) {
+    return sizeof(HostPlanChunk) +
+           chunk.hasCycle.size() * sizeof(unsigned char) +
+           chunk.levelOffsetBase.size() * sizeof(int) +
+           chunk.levelCount.size() * sizeof(int) +
+           chunk.levelOffsets.size() * sizeof(int) +
+           chunk.directions.size() * sizeof(int) +
+           chunk.globalDirections.size() * sizeof(int) +
+           chunk.ordinateX.size() * sizeof(double) +
+           chunk.ordinateY.size() * sizeof(double) +
+           chunk.ordinateZ.size() * sizeof(double) +
+           chunk.weights.size() * sizeof(double) +
+           chunk.orders.size() * sizeof(int);
+}
+
+std::size_t estimateDevicePlanChunkBytes(const HostPlanChunk& chunk, int cellCount) {
+    const std::size_t K = static_cast<std::size_t>(chunk.directionCount);
+    const std::size_t C = static_cast<std::size_t>(cellCount);
+    std::size_t bytes = K * C * sizeof(int);
+    bytes += K * (3 * sizeof(double) + sizeof(double));
+    bytes += K * (sizeof(unsigned char) + 3 * sizeof(int));
+    bytes += static_cast<std::size_t>(chunk.maxSweepLevelCount + 1) * K * sizeof(int);
+    return bytes;
+}
+
 constexpr std::uint64_t planChunkCacheMagic = 0x5253495357434831ULL;
 constexpr std::uint32_t planChunkCacheVersion = 1;
 
@@ -2274,16 +2299,27 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         }
         const std::size_t siDevicePlanCacheBudget =
             static_cast<std::size_t>(
-                envIntValue("RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB", 8192, 0, 14000)
+                envIntValue("RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB", 10000, 0, 14000)
+            ) * 1024ull * 1024ull;
+        const std::size_t siHostPlanCacheBudget =
+            static_cast<std::size_t>(
+                envIntValue("RSI_CUDA_SI_HOST_PLAN_CACHE_MB", 4096, 0, 65536)
             ) * 1024ull * 1024ull;
         std::size_t siDevicePlanCacheBytes = 0;
+        std::size_t siHostPlanCacheBytes = 0;
         std::vector<std::unique_ptr<DevicePlanChunk>> siDevicePlanCache(
             siDirectionChunks.size()
         );
+        std::vector<std::unique_ptr<HostPlanChunk>> siHostPlanCache(
+            siDirectionChunks.size()
+        );
         std::vector<std::size_t> siDevicePlanCacheChunkBytes(siDirectionChunks.size(), 0);
+        std::vector<std::size_t> siHostPlanCacheChunkBytes(siDirectionChunks.size(), 0);
         std::vector<double> siDevicePlanCacheScore(siDirectionChunks.size(), 0.0);
         std::size_t siDevicePlanCacheHits = 0;
         std::size_t siDevicePlanCacheMisses = 0;
+        std::size_t siHostPlanCacheHits = 0;
+        std::size_t siHostPlanCacheMisses = 0;
         const bool useSIPlanCostAdmission =
             envFlagEnabled("RSI_CUDA_SI_PLAN_COST_ADMISSION", true);
         const bool useSIPlanPrefetch =
@@ -2343,14 +2379,35 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                     ++siDevicePlanCacheMisses;
                     PlanChunkTiming chunkPlanTiming;
                     HostPlanChunk hostChunk;
-                    if (siPrefetchFuture.valid() && siPrefetchIndex == chunkIndex) {
+                    if (siHostPlanCache[chunkIndex]) {
+                        ++siHostPlanCacheHits;
+                        hostChunk = std::move(*siHostPlanCache[chunkIndex]);
+                        siHostPlanCache[chunkIndex].reset();
+                        siHostPlanCacheBytes -= siHostPlanCacheChunkBytes[chunkIndex];
+                        siHostPlanCacheChunkBytes[chunkIndex] = 0;
+                    } else if (siPrefetchFuture.valid() && siPrefetchIndex == chunkIndex) {
+                        ++siHostPlanCacheMisses;
                         hostChunk = siPrefetchFuture.get();
                         siPrefetchIndex = siDirectionChunks.size();
                     } else {
+                        ++siHostPlanCacheMisses;
                         hostChunk = preparePlanChunkHost(
                             mesh, ordinates, sweep, siDirectionChunks[chunkIndex],
                             &cacheKeyContext, &chunkPlanTiming
                         );
+                    }
+                    const std::size_t hostChunkBytes = hostPlanChunkBytes(hostChunk);
+                    const std::size_t projectedDeviceChunkBytes =
+                        estimateDevicePlanChunkBytes(hostChunk, C);
+                    std::unique_ptr<HostPlanChunk> hostChunkForCache;
+                    if (siHostPlanCacheBudget > 0 &&
+                        !siHostPlanCache[chunkIndex] &&
+                        hostChunkBytes <= siHostPlanCacheBudget &&
+                        (iteration > 1 ||
+                         siDevicePlanCacheBudget == 0 ||
+                         siDevicePlanCacheBytes + projectedDeviceChunkBytes >
+                             siDevicePlanCacheBudget)) {
+                        hostChunkForCache = std::make_unique<HostPlanChunk>(hostChunk);
                     }
                     temporaryChunk = uploadPreparedPlanChunk(
                         std::move(hostChunk), &chunkPlanTiming
@@ -2419,6 +2476,12 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         siDevicePlanCacheScore[chunkIndex] = planAdmissionScore;
                         siDevicePlanCache[chunkIndex] = std::move(temporaryChunk);
                         chunk = siDevicePlanCache[chunkIndex].get();
+                    }
+                    if (!chunk && hostChunkForCache &&
+                        siHostPlanCacheBytes + hostChunkBytes <= siHostPlanCacheBudget) {
+                        siHostPlanCacheBytes += hostChunkBytes;
+                        siHostPlanCacheChunkBytes[chunkIndex] = hostChunkBytes;
+                        siHostPlanCache[chunkIndex] = std::move(hostChunkForCache);
                     }
                     if (!chunk) chunk = temporaryChunk.get();
                 }
@@ -2627,6 +2690,15 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                   << ", bytes=" << siDevicePlanCacheBytes
                   << ", hits=" << siDevicePlanCacheHits
                   << ", misses=" << siDevicePlanCacheMisses << "\n";
+        std::size_t siHostPlanCachedChunks = 0;
+        for (const auto& cachedChunk : siHostPlanCache) {
+            if (cachedChunk) ++siHostPlanCachedChunks;
+        }
+        std::cerr << "CUDA streaming SI host plan cache: chunks="
+                  << siHostPlanCachedChunks << "/" << siDirectionChunks.size()
+                  << ", bytes=" << siHostPlanCacheBytes
+                  << ", hits=" << siHostPlanCacheHits
+                  << ", misses=" << siHostPlanCacheMisses << "\n";
     }
 
     const auto rsiStart = std::chrono::steady_clock::now();

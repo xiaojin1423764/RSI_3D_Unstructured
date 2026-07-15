@@ -43,10 +43,11 @@
 
 7. SI device plan cache：
    - streaming SI 阶段可把一部分已上传的 `DevicePlanChunk` 常驻 GPU。
-   - 默认 `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=8192`。
+   - 默认 `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=10000`。
    - 可设为 `0` 关闭，或设为 `4096` 降低显存占用。
    - 已输出常驻 chunk 数、device bytes、hit/miss 统计。
    - 默认启用按首轮 plan 成本选择常驻 chunk：`RSI_CUDA_SI_PLAN_COST_ADMISSION=1`。
+   - 已增加 SI packed host plan cache：`RSI_CUDA_SI_HOST_PLAN_CACHE_MB`，默认 `4096` MiB，可设为 `0` 关闭。
    - 已预留 SI host plan 异步预取：`RSI_CUDA_SI_PLAN_PREFETCH=1`，但默认关闭。
 
 8. cache 文件目录 shard：
@@ -375,6 +376,31 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
   - `si_sweep = 45.3119 s`
   - CUDA internal total：`87.6393 s`
   - 当前比 8 GiB 和 12 GiB 都更合适，后续可进一步扫 `9000/10000/11000`。
+- 已把默认 SI device cache 预算定为 10 GiB。
+
+SI packed host plan cache 实测：
+
+- 开关：`RSI_CUDA_SI_HOST_PLAN_CACHE_MB=<MiB>`，默认 `4096`。
+- 目的：缓存已经 pack 好的 `HostPlanChunk`，避免未进入 device cache 的 SI chunk 在后续迭代重复 disk/host cache load 和 pack。
+- `200k + S128 + 16 samples`，默认 10 GiB device cache，4 GiB host plan cache：
+  - 输出目录：`results/fig5_200k_s128_16_si_hostcache_default10gb/Cir/`
+  - host cache：`25/130` chunks，`2.49 GB`，hits `309`，misses `146`
+  - CUDA internal total：`76.4524 s`
+  - `si_plan = 37.9682 s`
+  - `si_sweep = 36.0905 s`
+  - `si_plan_breakdown_cache = 18.8991 s`
+  - `si_plan_breakdown_pack = 1.07792 s`
+  - `si_plan_breakdown_upload = 14.6367 s`
+  - 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
+  - 对比 fused default 输出，SI/RSI/RSI-tail 逐值 `max_abs = 0`。
+- 默认关闭 host cache 的一次回归中，`si_plan` 升到 `49.2553 s`，其中 `cache = 29.6315 s`，说明磁盘/OS cache 波动会明显影响 plan。
+- 结论：host cache 能稳定降低 cache/pack 抖动，默认启用 4 GiB；若内存紧张，可设 `RSI_CUDA_SI_HOST_PLAN_CACHE_MB=0` 关闭。
+
+上传路径和压缩方向：
+
+- 当前 `upload` 仍约 `14 s`，是 plan 的主要剩余项之一。
+- 后续更可行的是复用 temporary `DevicePlanChunk` buffer 或做 pinned/async H2D；这需要重构 `DeviceArray` 生命周期和 stream 管理，暂不作为默认改动。
+- 压缩 `orders` 对磁盘 cache 可能有帮助，但 200k cell 无法用 `uint16`，GPU 端压缩还需要解码 kernel，风险较高，暂只记录。
 
 ### 9. SI sweep breakdown
 
