@@ -900,6 +900,13 @@ bool envFlagEnabled(const char* name, bool defaultValue) {
     return std::atoi(value) != 0;
 }
 
+int envIntValue(const char* name, int defaultValue, int minValue, int maxValue) {
+    const char* value = std::getenv(name);
+    if (!value) return defaultValue;
+    const int parsed = std::atoi(value);
+    return std::max(minValue, std::min(maxValue, parsed));
+}
+
 std::unique_ptr<DeviceProblem> uploadProblem(
     const Mesh& mesh,
     const std::vector<Ordinate>& ordinates,
@@ -1028,7 +1035,8 @@ std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
     std::vector<int> levelOffsets;
     std::vector<int> orders(static_cast<std::size_t>(K) * C);
     std::vector<SweepPlan> localPlans;
-    constexpr int maxCachedChunkDirections = 256;
+    const int maxCachedChunkDirections =
+        envIntValue("RSI_CUDA_MAX_CACHED_PLAN_CHUNK", 256, 1, 4096);
     const bool useCache = sweepPlanChunkCacheEnabled() && K <= maxCachedChunkDirections;
     const std::uint64_t cacheKey =
         sweepPlanChunkCacheKey(mesh, ordinates, globalDirections);
@@ -1825,7 +1833,8 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     constexpr int reductionThreads = 256;
     constexpr int levelSweepThreads = 256;
     const int cellBlocks = (C + reductionThreads - 1) / reductionThreads;
-    const int siDirectionsPerChunk = 128;
+    const int siDirectionsPerChunk =
+        envIntValue("RSI_CUDA_SI_PLAN_CHUNK", 128, 4, 2048);
 
     CudaFigure5Result result;
     CudaEventTimer gpuTimer;

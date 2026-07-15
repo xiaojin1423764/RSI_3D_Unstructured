@@ -29,10 +29,15 @@
    - 复用 `RSI_SWEEP_PLAN_CACHE` 开关。
    - 复用 `RSI_SWEEP_PLAN_CACHE_DIR` 目录设置。
    - 默认只缓存 `K <= 256` 的 chunk，避免 RSI 大 unique-direction chunk 生成大量一次性 cache 文件。
+   - 可用 `RSI_CUDA_MAX_CACHED_PLAN_CHUNK` 调整缓存方向数上限。
 
 5. streaming-plan 触发阈值：
    - 默认阈值为 8 GiB。
    - 可用 `RSI_CUDA_STREAMING_PLAN_THRESHOLD_MB=0` 强制走 streaming-plan，用于测试。
+
+6. SI streaming chunk size：
+   - 默认 `RSI_CUDA_SI_PLAN_CHUNK=128`。
+   - 可用环境变量覆盖。已测试 512 在 200k/S128 上更慢，因此暂不作为默认值。
 
 ## 已验证结果
 
@@ -108,17 +113,26 @@ S128 directions -> 130 chunks * 128 directions
 - 降低 `si_plan` 中重复磁盘读取和反序列化开销。
 - 对 fixed RSI chunk 复用也有帮助。
 
-### 3. 可配置 SI chunk size
+### 3. SI chunk size 参数扫描
 
-当前 SI streaming chunk size 固定为 128 directions。
+当前 SI streaming chunk size 已可配置，默认 128 directions。
 
-建议增加环境变量：
+建议继续测试：
 
 ```text
-RSI_CUDA_SI_PLAN_CHUNK
+RSI_CUDA_SI_PLAN_CHUNK=256
+RSI_CUDA_SI_PLAN_CHUNK=512
+RSI_CUDA_SI_PLAN_CHUNK=1024
 ```
 
-测试 256/512 directions per chunk。
+已测试 512-direction chunk：
+
+- `200k + S128 + 16 samples`
+- wall time `440.45 s`
+- `si_plan = 409.591 s`
+- `si_sweep = 56.2771 s`
+
+该结果慢于 128-direction chunk，因此默认保持 128。
 
 预期收益：
 
