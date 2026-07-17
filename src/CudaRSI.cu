@@ -596,6 +596,91 @@ __global__ void sweepLevelTiledKernel(
     currentPsi[cellIndex] = rhs / diagonal;
 }
 
+__global__ void sweepLevelFaceLaneKernel(
+    DeviceMeshView mesh,
+    const double* ordinateX,
+    const double* ordinateY,
+    const double* ordinateZ,
+    const int* sweepOrders,
+    const int* sweepLevelOffsetBase,
+    const int* sweepLevelCount,
+    const int* sweepLevelOffsets,
+    const int* selectedDirection,
+    int directionBatch,
+    int sourceShape,
+    const double* previousPsi,
+    double* currentPsi,
+    bool sourceShared,
+    int level
+) {
+    constexpr int faceLanes = 4;
+    const int localDirection = blockIdx.x;
+    if (localDirection >= directionBatch) return;
+
+    const int C = mesh.cellCount;
+    const int direction = selectedDirection[localDirection];
+    const int levelCount = sweepLevelCount[direction];
+    if (level >= levelCount) return;
+
+    const int group = threadIdx.x / faceLanes;
+    const int faceLane = threadIdx.x % faceLanes;
+    const int groupsPerBlock = blockDim.x / faceLanes;
+    if (groupsPerBlock <= 0) return;
+
+    const double ox = ordinateX[direction];
+    const double oy = ordinateY[direction];
+    const double oz = ordinateZ[direction];
+    const int* order = sweepOrders + static_cast<std::size_t>(direction) * C;
+    const int levelBase = sweepLevelOffsetBase[direction];
+    const int begin = sweepLevelOffsets[levelBase + level];
+    const int end = sweepLevelOffsets[levelBase + level + 1];
+    const int index = begin + static_cast<int>(blockIdx.y) * groupsPerBlock + group;
+    if (index >= end) return;
+
+    const int cell = order[index];
+    const std::size_t outputIndex = static_cast<std::size_t>(localDirection);
+    const std::size_t cellIndex = outputIndex * C + cell;
+    double inflow = 0.0;
+    double outflow = 0.0;
+
+    const int faceBegin = mesh.cellFaceOffsets[cell];
+    const int faceEnd = mesh.cellFaceOffsets[cell + 1];
+    for (int refIndex = faceBegin + faceLane; refIndex < faceEnd; refIndex += faceLanes) {
+        const double nx = mesh.refNx[refIndex];
+        const double ny = mesh.refNy[refIndex];
+        const double nz = mesh.refNz[refIndex];
+        const double mu = ox * nx + oy * ny + oz * nz;
+        const double coefficient = fabs(mu) * mesh.refArea[refIndex];
+        if (coefficient <= 1.0e-14) continue;
+
+        if (mu > 0.0) {
+            outflow += coefficient;
+        } else {
+            const int neighbor = mesh.refNeighbor[refIndex];
+            const double psiIn = neighbor >= 0
+                ? currentPsi[outputIndex * C + neighbor]
+                : boundaryInflowRef(mesh, refIndex, ox, oy, oz, sourceShape);
+            inflow += coefficient * psiIn;
+        }
+    }
+
+    const int laneInWarp = threadIdx.x & 31;
+    const int subgroupBase = laneInWarp & ~(faceLanes - 1);
+    const unsigned mask = 0xFu << subgroupBase;
+    for (int offset = 2; offset > 0; offset /= 2) {
+        inflow += __shfl_down_sync(mask, inflow, offset, faceLanes);
+        outflow += __shfl_down_sync(mask, outflow, offset, faceLanes);
+    }
+
+    if (faceLane == 0) {
+        const double source = sourceShared ? previousPsi[cell] : previousPsi[cellIndex];
+        const double rhs =
+            mesh.volume[cell] * (mesh.sigmaS[cell] * source + mesh.cellQ[cell]) + inflow;
+        const double diagonal = mesh.sigmaT[cell] * mesh.volume[cell] + outflow;
+        currentPsi[cellIndex] = rhs / diagonal;
+    }
+}
+
 __global__ void sweepLevelFusedKernel(
     DeviceMeshView mesh,
     const double* ordinateX,
@@ -750,6 +835,30 @@ std::vector<int> generateDirectionSchedule(
     return schedule;
 }
 
+std::vector<int> uniqueDirectionsForBatch(
+    const std::vector<int>& schedule,
+    int batchStart,
+    int batchSize,
+    int iterationCount
+) {
+    std::vector<int> uniqueDirections;
+    uniqueDirections.reserve(static_cast<std::size_t>(batchSize) * iterationCount);
+    for (int localSample = 0; localSample < batchSize; ++localSample) {
+        const int sample = batchStart + localSample;
+        for (int iteration = 0; iteration < iterationCount; ++iteration) {
+            uniqueDirections.push_back(
+                schedule[static_cast<std::size_t>(sample) * iterationCount + iteration]
+            );
+        }
+    }
+    std::sort(uniqueDirections.begin(), uniqueDirections.end());
+    uniqueDirections.erase(
+        std::unique(uniqueDirections.begin(), uniqueDirections.end()),
+        uniqueDirections.end()
+    );
+    return uniqueDirections;
+}
+
 struct DeviceProblem {
     int cellCount = 0;
     int directionCount = 0;
@@ -844,6 +953,13 @@ struct PlanChunkTiming {
     std::size_t fixedCacheHits = 0;
     std::size_t fixedCacheMisses = 0;
     double fixedCacheWallSeconds = 0.0;
+};
+
+struct PrefetchedHostPlanChunk {
+    HostPlanChunk host;
+    PlanChunkTiming timing;
+    double uniqueSeconds = 0.0;
+    double wallSeconds = 0.0;
 };
 
 void accumulatePlanChunkTiming(PlanChunkTiming& total, const PlanChunkTiming& step) {
@@ -1785,25 +1901,6 @@ std::unique_ptr<DevicePlanChunk> uploadPreparedPlanChunk(
     return chunk;
 }
 
-std::unique_ptr<DevicePlanChunk> uploadPlanChunk(
-    const Mesh& mesh,
-    const std::vector<Ordinate>& ordinates,
-    const TransportSweep& sweep,
-    const std::vector<int>& globalDirections,
-    SweepPlanChunkCacheKeyContext* cacheKeyContext = nullptr,
-    PlanChunkTiming* timing = nullptr,
-    bool allowFixedChunkReuse = true
-) {
-    HostPlanChunk host = preparePlanChunkHost(
-        mesh, ordinates, sweep, globalDirections, cacheKeyContext, timing,
-        allowFixedChunkReuse
-    );
-    std::unique_ptr<DevicePlanChunk> chunk = uploadPreparedPlanChunk(
-        std::move(host), timing
-    );
-    return chunk;
-}
-
 constexpr std::uint64_t siCheckpointMagic = 0x5253495349435031ULL;
 constexpr std::uint64_t rsiCheckpointMagic = 0x5253495253494350ULL;
 
@@ -2241,9 +2338,16 @@ CudaFigure5Result runFigure5Cuda(
     std::vector<int> batchIterationMaxLevel(iterationCount, 0);
     const bool useRSIBatchPass = envFlagEnabled("RSI_CUDA_RSI_BATCH_PASS", false);
     const bool useRSIWavefront = envFlagEnabled("RSI_CUDA_RSI_WAVEFRONT", true);
+    const bool useRSIFusedWavefront =
+        envFlagEnabled("RSI_CUDA_RSI_FUSED_WAVEFRONT", C >= 100000);
+    const bool useRSIAdaptiveWavefront =
+        envFlagEnabled("RSI_CUDA_RSI_ADAPTIVE_WAVEFRONT", false);
+    const int rsiAdaptiveTileThreshold =
+        envIntValue("RSI_CUDA_RSI_ADAPTIVE_TILE_THRESHOLD", 4, 2, 1024);
     const bool useRSITiledWavefront =
         envFlagEnabled("RSI_CUDA_RSI_TILED_WAVEFRONT", true);
-    constexpr int levelSweepThreads = 256;
+    const int levelSweepThreads =
+        envIntValue("RSI_CUDA_SI_LEVEL_SWEEP_THREADS", 256, 32, 1024);
     const int levelTileCount = std::max(
         1,
         (problem->maxSweepLevelWidth + levelSweepThreads - 1) / levelSweepThreads
@@ -2299,49 +2403,74 @@ CudaFigure5Result runFigure5Cuda(
             const bool iterationHasCycle = batchIterationHasCycle[directionOffset] != 0;
             const int* iterationDirections =
                 selectedDirections.ptr + static_cast<std::size_t>(directionOffset) * batchSize;
+            const bool useFusedForBatch =
+                useRSIFusedWavefront &&
+                !(useRSIAdaptiveWavefront && batchSize >= 64 &&
+                  levelTileCount >= rsiAdaptiveTileThreshold);
             const bool useTiledForBatch =
+                !useFusedForBatch &&
                 useRSITiledWavefront && batchSize >= 64 && levelTileCount > 1;
             if (useRSIWavefront && !iterationHasCycle) {
-                for (int level = 0; level < batchIterationMaxLevel[directionOffset]; ++level) {
-                    if (useTiledForBatch) {
-                        const dim3 grid(batchSize, levelTileCount);
-                        sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
-                            problem->mesh.view(C),
-                            problem->ordinateX.ptr,
-                            problem->ordinateY.ptr,
-                            problem->ordinateZ.ptr,
-                            problem->orders.ptr,
-                            problem->levelOffsetBase.ptr,
-                            problem->levelCount.ptr,
-                            problem->levelOffsets.ptr,
-                            iterationDirections,
-                            batchSize,
-                            sourceShapeCode,
-                            previousPsi,
-                            currentPsi,
-                            false,
-                            level
-                        );
-                    } else {
-                        sweepLevelKernel<<<batchSize, levelSweepThreads>>>(
-                            problem->mesh.view(C),
-                            problem->ordinateX.ptr,
-                            problem->ordinateY.ptr,
-                            problem->ordinateZ.ptr,
-                            problem->orders.ptr,
-                            problem->levelOffsetBase.ptr,
-                            problem->levelCount.ptr,
-                            problem->levelOffsets.ptr,
-                            iterationDirections,
-                            batchSize,
-                            sourceShapeCode,
-                            previousPsi,
-                            currentPsi,
-                            false,
-                            level
-                        );
+                if (useFusedForBatch) {
+                    sweepLevelFusedKernel<<<batchSize, levelSweepThreads>>>(
+                        problem->mesh.view(C),
+                        problem->ordinateX.ptr,
+                        problem->ordinateY.ptr,
+                        problem->ordinateZ.ptr,
+                        problem->orders.ptr,
+                        problem->levelOffsetBase.ptr,
+                        problem->levelCount.ptr,
+                        problem->levelOffsets.ptr,
+                        iterationDirections,
+                        batchSize,
+                        sourceShapeCode,
+                        previousPsi,
+                        currentPsi,
+                        false
+                    );
+                    checkCuda(cudaGetLastError(), "launch combined CUDA RSI fused levels");
+                } else {
+                    for (int level = 0; level < batchIterationMaxLevel[directionOffset]; ++level) {
+                        if (useTiledForBatch) {
+                            const dim3 grid(batchSize, levelTileCount);
+                            sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
+                                problem->mesh.view(C),
+                                problem->ordinateX.ptr,
+                                problem->ordinateY.ptr,
+                                problem->ordinateZ.ptr,
+                                problem->orders.ptr,
+                                problem->levelOffsetBase.ptr,
+                                problem->levelCount.ptr,
+                                problem->levelOffsets.ptr,
+                                iterationDirections,
+                                batchSize,
+                                sourceShapeCode,
+                                previousPsi,
+                                currentPsi,
+                                false,
+                                level
+                            );
+                        } else {
+                            sweepLevelKernel<<<batchSize, levelSweepThreads>>>(
+                                problem->mesh.view(C),
+                                problem->ordinateX.ptr,
+                                problem->ordinateY.ptr,
+                                problem->ordinateZ.ptr,
+                                problem->orders.ptr,
+                                problem->levelOffsetBase.ptr,
+                                problem->levelCount.ptr,
+                                problem->levelOffsets.ptr,
+                                iterationDirections,
+                                batchSize,
+                                sourceShapeCode,
+                                previousPsi,
+                                currentPsi,
+                                false,
+                                level
+                            );
+                        }
+                        checkCuda(cudaGetLastError(), "launch combined CUDA RSI wavefront level");
                     }
-                    checkCuda(cudaGetLastError(), "launch combined CUDA RSI wavefront level");
                 }
             } else {
                 const int localPassCount =
@@ -2470,8 +2599,12 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     int maxSIters,
     double siTolerance,
     int sampleCount,
-    int tailExtra
+    int tailExtra,
+    const std::vector<int>& rsiCheckpoints,
+    bool anisotropicScattering
 ) {
+    (void)rsiCheckpoints;
+    (void)anisotropicScattering;
     if (maxSIters <= 0 || sampleCount <= 0 || tailExtra < 0) {
         throw std::runtime_error("invalid CUDA Figure 5 iteration/sample configuration");
     }
@@ -2493,7 +2626,8 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     constexpr int sweepThreads = 128;
     constexpr int samplesPerSweepBlock = 32;
     constexpr int reductionThreads = 256;
-    constexpr int levelSweepThreads = 256;
+    const int levelSweepThreads =
+        envIntValue("RSI_CUDA_SI_LEVEL_SWEEP_THREADS", 256, 32, 1024);
     const int cellBlocks = (C + reductionThreads - 1) / reductionThreads;
     const int siDirectionsPerChunk =
         envIntValue("RSI_CUDA_SI_PLAN_CHUNK", 128, 4, 2048);
@@ -3005,37 +3139,84 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     std::vector<int> globalToLocal(M, -1);
     const bool useRSIBatchPass = envFlagEnabled("RSI_CUDA_RSI_BATCH_PASS", false);
     const bool useRSIWavefront = envFlagEnabled("RSI_CUDA_RSI_WAVEFRONT", true);
+    const bool useRSIFusedWavefront =
+        envFlagEnabled("RSI_CUDA_RSI_FUSED_WAVEFRONT", C >= 100000);
+    const bool useRSIAdaptiveWavefront =
+        envFlagEnabled("RSI_CUDA_RSI_ADAPTIVE_WAVEFRONT", false);
+    const int rsiAdaptiveTileThreshold =
+        envIntValue("RSI_CUDA_RSI_ADAPTIVE_TILE_THRESHOLD", 4, 2, 1024);
     const bool useRSITiledWavefront =
         envFlagEnabled("RSI_CUDA_RSI_TILED_WAVEFRONT", true);
+    const bool useRSIPlanPrefetch =
+        envFlagEnabled("RSI_CUDA_RSI_PLAN_PREFETCH", true);
+    const bool useRSIGraphWavefront =
+        envFlagEnabled("RSI_CUDA_RSI_GRAPH_WAVEFRONT", false);
+    const bool useRSIFaceLaneWavefront =
+        envFlagEnabled("RSI_CUDA_RSI_FACE_LANE_WAVEFRONT", false);
+    std::unique_ptr<CudaStream> rsiGraphStream;
+    if (useRSIGraphWavefront) {
+        rsiGraphStream = std::make_unique<CudaStream>();
+    }
+    std::future<PrefetchedHostPlanChunk> rsiPlanPrefetchFuture;
+    int rsiPlanPrefetchBatchStart = -1;
+    auto launchRSIPlanPrefetch = [&](int nextBatchStart) {
+        if (!useRSIPlanPrefetch || rsiPlanPrefetchFuture.valid()) return;
+        if (nextBatchStart >= sampleCount) return;
+        const int nextBatchSize = std::min(batchCapacity, sampleCount - nextBatchStart);
+        rsiPlanPrefetchBatchStart = nextBatchStart;
+        rsiPlanPrefetchFuture = std::async(
+            std::launch::async,
+            [&mesh, &ordinates, &sweep, &schedule, &cacheKeyContext,
+             nextBatchStart, nextBatchSize, iterationCount] {
+                PrefetchedHostPlanChunk prefetched;
+                const auto wallStart = std::chrono::steady_clock::now();
+                const auto uniqueStart = std::chrono::steady_clock::now();
+                const std::vector<int> uniqueDirections = uniqueDirectionsForBatch(
+                    schedule, nextBatchStart, nextBatchSize, iterationCount
+                );
+                prefetched.uniqueSeconds = secondsBetween(
+                    uniqueStart, std::chrono::steady_clock::now()
+                );
+                prefetched.host = preparePlanChunkHost(
+                    mesh, ordinates, sweep, uniqueDirections,
+                    &cacheKeyContext, &prefetched.timing
+                );
+                prefetched.wallSeconds = secondsBetween(
+                    wallStart, std::chrono::steady_clock::now()
+                );
+                return prefetched;
+            }
+        );
+    };
 
     for (int batchStart = 0; batchStart < sampleCount; batchStart += batchCapacity) {
         const int batchSize = std::min(batchCapacity, sampleCount - batchStart);
         const std::size_t batchCellCount = static_cast<std::size_t>(batchSize) * C;
 
-        const auto uniqueStart = std::chrono::steady_clock::now();
-        std::vector<int> uniqueDirections;
-        uniqueDirections.reserve(static_cast<std::size_t>(batchSize) * iterationCount);
-        for (int localSample = 0; localSample < batchSize; ++localSample) {
-            const int sample = batchStart + localSample;
-            for (int iteration = 0; iteration < iterationCount; ++iteration) {
-                uniqueDirections.push_back(
-                    schedule[static_cast<std::size_t>(sample) * iterationCount + iteration]
-                );
-            }
-        }
-        std::sort(uniqueDirections.begin(), uniqueDirections.end());
-        uniqueDirections.erase(
-            std::unique(uniqueDirections.begin(), uniqueDirections.end()),
-            uniqueDirections.end()
-        );
-        rsiUniqueSeconds += secondsBetween(uniqueStart, std::chrono::steady_clock::now());
         const auto planStart = std::chrono::steady_clock::now();
         PlanChunkTiming batchPlanTiming;
-        std::unique_ptr<DevicePlanChunk> chunk =
-            uploadPlanChunk(
+        HostPlanChunk hostChunk;
+        if (rsiPlanPrefetchFuture.valid() &&
+            rsiPlanPrefetchBatchStart == batchStart) {
+            PrefetchedHostPlanChunk prefetched = rsiPlanPrefetchFuture.get();
+            rsiPlanPrefetchBatchStart = -1;
+            rsiUniqueSeconds += prefetched.uniqueSeconds;
+            accumulatePlanChunkTiming(batchPlanTiming, prefetched.timing);
+            hostChunk = std::move(prefetched.host);
+        } else {
+            const auto uniqueStart = std::chrono::steady_clock::now();
+            const std::vector<int> uniqueDirections = uniqueDirectionsForBatch(
+                schedule, batchStart, batchSize, iterationCount
+            );
+            rsiUniqueSeconds += secondsBetween(uniqueStart, std::chrono::steady_clock::now());
+            hostChunk = preparePlanChunkHost(
                 mesh, ordinates, sweep, uniqueDirections,
                 &cacheKeyContext, &batchPlanTiming
             );
+        }
+        std::unique_ptr<DevicePlanChunk> chunk = uploadPreparedPlanChunk(
+            std::move(hostChunk), &batchPlanTiming
+        );
         const auto planSyncStart = std::chrono::steady_clock::now();
         checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA RSI plan upload");
         batchPlanTiming.syncSeconds += secondsBetween(
@@ -3044,8 +3225,8 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         accumulatePlanChunkTiming(rsiPlanBreakdown, batchPlanTiming);
         rsiPlanSeconds += secondsBetween(planStart, std::chrono::steady_clock::now());
 
-        for (int local = 0; local < static_cast<int>(uniqueDirections.size()); ++local) {
-            globalToLocal[uniqueDirections[local]] = local;
+        for (int local = 0; local < static_cast<int>(chunk->globalDirections.size()); ++local) {
+            globalToLocal[chunk->globalDirections[local]] = local;
         }
         std::fill(batchIterationHasCycle.begin(), batchIterationHasCycle.end(), 0);
         std::fill(batchIterationMaxLevel.begin(), batchIterationMaxLevel.end(), 0);
@@ -3069,7 +3250,8 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                 );
             }
         }
-        for (int globalDirection : uniqueDirections) globalToLocal[globalDirection] = -1;
+        for (int globalDirection : chunk->globalDirections) globalToLocal[globalDirection] = -1;
+        launchRSIPlanPrefetch(batchStart + batchCapacity);
 
         const auto directionCopyStart = std::chrono::steady_clock::now();
         checkCuda(cudaMemcpy(selectedDirections.ptr, batchDirections.data(),
@@ -3092,6 +3274,12 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
             1,
             (chunk->maxSweepLevelWidth + levelSweepThreads - 1) / levelSweepThreads
         );
+        const int faceLaneCellsPerBlock = levelSweepThreads / 4;
+        const int faceLaneTileCount = std::max(
+            1,
+            (chunk->maxSweepLevelWidth + faceLaneCellsPerBlock - 1) /
+                faceLaneCellsPerBlock
+        );
         for (int iteration = 1; iteration <= iterationCount; ++iteration) {
             checkCuda(cudaMemset(currentPsi, 0, batchCellCount * sizeof(double)),
                       "clear streaming CUDA RSI current layer");
@@ -3100,49 +3288,163 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
             const bool iterationHasCycle = batchIterationHasCycle[directionOffset] != 0;
             const int* iterationDirections =
                 selectedDirections.ptr + static_cast<std::size_t>(directionOffset) * batchSize;
+            const bool useFusedForBatch =
+                useRSIFusedWavefront &&
+                !(useRSIAdaptiveWavefront && batchSize >= 64 &&
+                  levelTileCount >= rsiAdaptiveTileThreshold);
             const bool useTiledForBatch =
+                !useFusedForBatch &&
                 useRSITiledWavefront && batchSize >= 64 && levelTileCount > 1;
             if (useRSIWavefront && !iterationHasCycle) {
-                for (int level = 0; level < batchIterationMaxLevel[directionOffset]; ++level) {
-                    if (useTiledForBatch) {
-                        const dim3 grid(batchSize, levelTileCount);
-                        sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
-                            staticProblem->mesh.view(C),
-                            chunk->ordinateX.ptr,
-                            chunk->ordinateY.ptr,
-                            chunk->ordinateZ.ptr,
-                            chunk->orders.ptr,
-                            chunk->levelOffsetBase.ptr,
-                            chunk->levelCount.ptr,
-                            chunk->levelOffsets.ptr,
-                            iterationDirections,
-                            batchSize,
-                            sourceShapeCode,
-                            previousPsi,
-                            currentPsi,
-                            false,
-                            level
-                        );
-                    } else {
-                        sweepLevelKernel<<<batchSize, levelSweepThreads>>>(
-                            staticProblem->mesh.view(C),
-                            chunk->ordinateX.ptr,
-                            chunk->ordinateY.ptr,
-                            chunk->ordinateZ.ptr,
-                            chunk->orders.ptr,
-                            chunk->levelOffsetBase.ptr,
-                            chunk->levelCount.ptr,
-                            chunk->levelOffsets.ptr,
-                            iterationDirections,
-                            batchSize,
-                            sourceShapeCode,
-                            previousPsi,
-                            currentPsi,
-                            false,
-                            level
-                        );
+                if (useFusedForBatch) {
+                    sweepLevelFusedKernel<<<batchSize, levelSweepThreads>>>(
+                        staticProblem->mesh.view(C),
+                        chunk->ordinateX.ptr,
+                        chunk->ordinateY.ptr,
+                        chunk->ordinateZ.ptr,
+                        chunk->orders.ptr,
+                        chunk->levelOffsetBase.ptr,
+                        chunk->levelCount.ptr,
+                        chunk->levelOffsets.ptr,
+                        iterationDirections,
+                        batchSize,
+                        sourceShapeCode,
+                        previousPsi,
+                        currentPsi,
+                        false
+                    );
+                    checkCuda(cudaGetLastError(), "launch streaming CUDA RSI fused levels");
+                } else if (useRSIGraphWavefront) {
+                    cudaGraph_t graph = nullptr;
+                    cudaGraphExec_t graphExec = nullptr;
+                    checkCuda(
+                        cudaStreamBeginCapture(
+                            rsiGraphStream->stream, cudaStreamCaptureModeGlobal
+                        ),
+                        "begin streaming CUDA RSI graph capture"
+                    );
+                    for (int level = 0; level < batchIterationMaxLevel[directionOffset]; ++level) {
+                        if (useTiledForBatch) {
+                            const dim3 grid(batchSize, levelTileCount);
+                            sweepLevelTiledKernel<<<grid, levelSweepThreads, 0,
+                                                     rsiGraphStream->stream>>>(
+                                staticProblem->mesh.view(C),
+                                chunk->ordinateX.ptr,
+                                chunk->ordinateY.ptr,
+                                chunk->ordinateZ.ptr,
+                                chunk->orders.ptr,
+                                chunk->levelOffsetBase.ptr,
+                                chunk->levelCount.ptr,
+                                chunk->levelOffsets.ptr,
+                                iterationDirections,
+                                batchSize,
+                                sourceShapeCode,
+                                previousPsi,
+                                currentPsi,
+                                false,
+                                level
+                            );
+                        } else {
+                            sweepLevelKernel<<<batchSize, levelSweepThreads, 0,
+                                                 rsiGraphStream->stream>>>(
+                                staticProblem->mesh.view(C),
+                                chunk->ordinateX.ptr,
+                                chunk->ordinateY.ptr,
+                                chunk->ordinateZ.ptr,
+                                chunk->orders.ptr,
+                                chunk->levelOffsetBase.ptr,
+                                chunk->levelCount.ptr,
+                                chunk->levelOffsets.ptr,
+                                iterationDirections,
+                                batchSize,
+                                sourceShapeCode,
+                                previousPsi,
+                                currentPsi,
+                                false,
+                                level
+                            );
+                        }
                     }
-                    checkCuda(cudaGetLastError(), "launch streaming CUDA RSI level");
+                    checkCuda(cudaGetLastError(), "capture streaming CUDA RSI graph levels");
+                    checkCuda(
+                        cudaStreamEndCapture(rsiGraphStream->stream, &graph),
+                        "end streaming CUDA RSI graph capture"
+                    );
+                    checkCuda(
+                        cudaGraphInstantiate(&graphExec, graph, nullptr, nullptr, 0),
+                        "instantiate streaming CUDA RSI graph"
+                    );
+                    checkCuda(
+                        cudaGraphLaunch(graphExec, rsiGraphStream->stream),
+                        "launch streaming CUDA RSI graph"
+                    );
+                    checkCuda(
+                        cudaStreamSynchronize(rsiGraphStream->stream),
+                        "synchronize streaming CUDA RSI graph"
+                    );
+                    if (graphExec) cudaGraphExecDestroy(graphExec);
+                    if (graph) cudaGraphDestroy(graph);
+                } else {
+                    for (int level = 0; level < batchIterationMaxLevel[directionOffset]; ++level) {
+                        if (useRSIFaceLaneWavefront && useTiledForBatch) {
+                            const dim3 grid(batchSize, faceLaneTileCount);
+                            sweepLevelFaceLaneKernel<<<grid, levelSweepThreads>>>(
+                                staticProblem->mesh.view(C),
+                                chunk->ordinateX.ptr,
+                                chunk->ordinateY.ptr,
+                                chunk->ordinateZ.ptr,
+                                chunk->orders.ptr,
+                                chunk->levelOffsetBase.ptr,
+                                chunk->levelCount.ptr,
+                                chunk->levelOffsets.ptr,
+                                iterationDirections,
+                                batchSize,
+                                sourceShapeCode,
+                                previousPsi,
+                                currentPsi,
+                                false,
+                                level
+                            );
+                        } else if (useTiledForBatch) {
+                            const dim3 grid(batchSize, levelTileCount);
+                            sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
+                                staticProblem->mesh.view(C),
+                                chunk->ordinateX.ptr,
+                                chunk->ordinateY.ptr,
+                                chunk->ordinateZ.ptr,
+                                chunk->orders.ptr,
+                                chunk->levelOffsetBase.ptr,
+                                chunk->levelCount.ptr,
+                                chunk->levelOffsets.ptr,
+                                iterationDirections,
+                                batchSize,
+                                sourceShapeCode,
+                                previousPsi,
+                                currentPsi,
+                                false,
+                                level
+                            );
+                        } else {
+                            sweepLevelKernel<<<batchSize, levelSweepThreads>>>(
+                                staticProblem->mesh.view(C),
+                                chunk->ordinateX.ptr,
+                                chunk->ordinateY.ptr,
+                                chunk->ordinateZ.ptr,
+                                chunk->orders.ptr,
+                                chunk->levelOffsetBase.ptr,
+                                chunk->levelCount.ptr,
+                                chunk->levelOffsets.ptr,
+                                iterationDirections,
+                                batchSize,
+                                sourceShapeCode,
+                                previousPsi,
+                                currentPsi,
+                                false,
+                                level
+                            );
+                        }
+                        checkCuda(cudaGetLastError(), "launch streaming CUDA RSI level");
+                    }
                 }
             } else {
                 const int localPassCount =
@@ -3197,7 +3499,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA RSI batch");
         std::cerr << "CUDA streaming RSI batch complete: samples="
                   << batchStart + batchSize << "/" << sampleCount
-                  << ", unique_directions=" << uniqueDirections.size() << "\n";
+                  << ", unique_directions=" << chunk->globalDirections.size() << "\n";
     }
 
     result.rsi.resize(C);

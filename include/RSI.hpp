@@ -44,6 +44,7 @@ public:
     RSISolver(const Mesh& mesh, RSIConfig cfg);
 
     std::vector<Figure2Row> runFigure2Experiment();
+    std::vector<Figure2Row> runFigure2GPUConvergence();
     std::vector<double> runSIField(int& convergedN) const;
     std::vector<double> runRSIFieldAtN(int N, int sampleCount, int tailExtra) const;
     Figure5Fields runFigure5GPU(int sampleCount, int tailExtra) const;

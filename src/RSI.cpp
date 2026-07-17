@@ -725,6 +725,50 @@ std::vector<Figure2Row> RSISolver::runFigure2Experiment() {
     return rows;
 }
 
+std::vector<Figure2Row> RSISolver::runFigure2GPUConvergence() {
+#ifdef RSI_ENABLE_CUDA
+    if (cfg_.groupCount != 1 || !cfg_.useGPU ||
+        (cfg_.scattering != "isotropic" && cfg_.scattering != "anisotropic")) {
+        throw std::runtime_error(
+            "GPU Figure 2 convergence currently supports isotropic/anisotropic CUDA runs with G=1"
+        );
+    }
+    if (cfg_.sampleCounts.empty()) {
+        throw std::runtime_error("GPU Figure 2 convergence requires sample counts");
+    }
+    const int maxSamples =
+        *std::max_element(cfg_.sampleCounts.begin(), cfg_.sampleCounts.end());
+    const CudaFigure5Result fields = runFigure5CudaStreamingPlans(
+        mesh_, ordinates_, sweep_, cfg_.sourceShape, cfg_.seed,
+        cfg_.maxSIters, cfg_.siTolerance, maxSamples, 0, cfg_.sampleCounts,
+        cfg_.scattering == "anisotropic"
+    );
+    std::vector<Figure2Row> rows;
+    if (fields.rsiCheckpointSamples.size() != fields.rsiCheckpoints.size()) {
+        throw std::runtime_error("CUDA Figure 2 checkpoint result size mismatch");
+    }
+    for (std::size_t index = 0; index < fields.rsiCheckpointSamples.size(); ++index) {
+        const int S = fields.rsiCheckpointSamples[index];
+        const double e = relativeL2(fields.rsiCheckpoints[index], fields.siFine, mesh_);
+        rows.push_back({
+            cfg_.scattering,
+            static_cast<int>(ordinates_.size()),
+            S,
+            fields.convergedN,
+            e
+        });
+        std::cout << cfg_.scattering << ", M=" << ordinates_.size()
+                  << ", S=" << S << ", N=" << fields.convergedN
+                  << ", e=" << e << "\n";
+    }
+    return rows;
+#else
+    throw std::runtime_error(
+        "this executable was built without CUDA; use `make gpu` and run rsi_unstructured_gpu"
+    );
+#endif
+}
+
 
 
 // 计算两个 cell 标量场 a 和 b 的相对 L2 误差

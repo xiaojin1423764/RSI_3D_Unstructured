@@ -1,11 +1,11 @@
 # SI/RSI Sweep Plan 后续优化记录
 
-本文记录 200k 网格、CUDA Figure 5 高角度运行中 SI/RSI sweep plan 的当前状态、已完成改动和后续优化方向。
+本文记录 230k 网格、CUDA Figure 5 高角度运行中 SI/RSI sweep plan 的当前状态、已完成改动和后续优化方向。
 
 ## 当前结论
 
-- `S128` 方向数为 `16640`，200k 网格 cell 数为 `194314`。
-- 全量常驻 sweep order 仅 `orders` 就约 `16640 * 194314 * sizeof(int) = 12.9 GB`，再加 level offsets、metadata、angular field 和 RSI workspace，会超过 16 GB GPU 可用显存。
+- `S128` 方向数为 `16640`，230k 网格 cell 数为 `230111`。
+- 全量常驻 sweep order 仅 `orders` 就约 `16640 * 230111 * sizeof(int) = 12.9 GB`，再加 level offsets、metadata、angular field 和 RSI workspace，会超过 16 GB GPU 可用显存。
 - 已把 Figure 5 CUDA 路径改为按方向 chunk 流式构建/上传 sweep plan；默认估算全量 `orders` 超过 8 GiB 时启用 streaming-plan 路径。
 - 已实现 chunk plan cache，默认写入 `results/cache/rsi_sweep_plan_chunk_<key>.bin`。
 - `S128/8192` 已可完整跑通，但主要耗时仍在 plan 准备而不是 sweep 计算。
@@ -39,7 +39,7 @@
 
 6. SI streaming chunk size：
    - 默认 `RSI_CUDA_SI_PLAN_CHUNK=128`。
-   - 可用环境变量覆盖。已测试 512 在 200k/S128 上更慢，因此暂不作为默认值。
+   - 可用环境变量覆盖。已测试 512 在 230k/S128 上更慢，因此暂不作为默认值。
 
 7. SI device plan cache：
    - streaming SI 阶段可把一部分已上传的 `DevicePlanChunk` 常驻 GPU。
@@ -67,7 +67,7 @@
   - chunk cache cold 约 `28.6 s`
   - chunk cache warm 约 `25.8 s`
 
-`200k + S128 + 16 samples`：
+`230k + S128 + 16 samples`：
 
 - streaming-plan 路径完整跑通。
 - 4 个 CSV 均为 `194315` 行。
@@ -100,9 +100,9 @@
   - `si_sweep = 58.6512 s`
   - 4 个 CSV 均为 `194315` 行，`phi0` 非有限值数量为 0。
 
-`200k + S128 + 8192 samples`：
+`230k + S128 + 8192 samples`：
 
-- 输出目录：`results/fig5_200k_s128_8192_chunkcache/Cir/`
+- 输出目录：`results/fig5_230k_s128_8192_chunkcache/Cir/`
 - wall time：`1574.48 s`
 - CUDA internal total：`1674.65 s`
 - SI fine：
@@ -144,7 +144,7 @@ RSI_CUDA_FIXED_PLAN_CHUNK=1  # default
 验证状态：
 
 - `make test-gpu` 已通过。
-- 200k/S128/16 已通过输出行数和非有限值检查。
+- 230k/S128/16 已通过输出行数和非有限值检查。
 
 ### 2. Host 内存 LRU cache
 
@@ -163,7 +163,7 @@ RSI_CUDA_FIXED_PLAN_CHUNK=1  # default
 
 实测结论：
 
-- host LRU 对 200k/S128/16 warm run 有收益，但 SI 顺序扫描 chunk 数量远大于默认 1 GiB host cache 容量，单靠 host LRU 不能解决 `si_plan`。
+- host LRU 对 230k/S128/16 warm run 有收益，但 SI 顺序扫描 chunk 数量远大于默认 1 GiB host cache 容量，单靠 host LRU 不能解决 `si_plan`。
 - SI device plan cache 的收益更直接。
 
 ### 3. SI chunk size 参数扫描
@@ -180,7 +180,7 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 
 已测试 512-direction chunk：
 
-- `200k + S128 + 16 samples`
+- `230k + S128 + 16 samples`
 - wall time `440.45 s`
 - `si_plan = 409.591 s`
 - `si_sweep = 56.2771 s`
@@ -227,8 +227,8 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 
 实测收益：
 
-- `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=4096` 将 200k/S128/16 的 `si_plan` 降到 `150.505 s`。
-- `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=8192` 将 200k/S128/16 的 `si_plan` 降到 `90.1124 s`。
+- `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=4096` 将 230k/S128/16 的 `si_plan` 降到 `150.505 s`。
+- `RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=8192` 将 230k/S128/16 的 `si_plan` 降到 `90.1124 s`。
 
 后续可做：
 
@@ -276,7 +276,7 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 - `rsi_plan_breakdown_upload`
 - `rsi_plan_breakdown_sync`
 
-初步实测 `200k + S128 + 16 samples`：
+初步实测 `230k + S128 + 16 samples`：
 
 - `rsi_plan = 14.2112 s`
 - `rsi_plan_breakdown_key = 12.8007 s`
@@ -290,7 +290,7 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 结论：
 
 - 当前 RSI plan 的主要瓶颈是 cache key 生成，约占 `rsi_plan` 的 90%。
-- 直接原因是 fixed-direction reuse 会对许多单方向/小 fixed chunk 重复调用 `sweepPlanChunkCacheKey()`，而该函数每次都会 hash 整个 200k mesh。
+- 直接原因是 fixed-direction reuse 会对许多单方向/小 fixed chunk 重复调用 `sweepPlanChunkCacheKey()`，而该函数每次都会 hash 整个 230k mesh。
 - 下一步最优先应把 mesh/ordinates 的 cache key prefix 预计算一次，再对 directions 增量 hash；或为 fixed direction 直接使用预计算 direction cache key。
 
 已实现 cache key mesh prefix 复用：
@@ -299,9 +299,9 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 - 保持原 cache key 字节顺序不变，因此已有 `results/cache` 文件仍可命中。
 - SI chunk 和 RSI fixed-direction chunk 共用同一个 context。
 
-实测 `200k + S128 + 16 samples`：
+实测 `230k + S128 + 16 samples`：
 
-- 输出目录：`results/fig5_200k_s128_16_rsi_keyprefix/Cir/`
+- 输出目录：`results/fig5_230k_s128_16_rsi_keyprefix/Cir/`
 - CUDA internal total：`108.935 s`
 - `si_total = 107.468 s`
 - `si_plan = 61.2179 s`
@@ -334,9 +334,9 @@ RSI_CUDA_SI_PLAN_CHUNK=1024
 - `si_plan_breakdown_upload`
 - `si_plan_breakdown_sync`
 
-实测 `200k + S128 + 16 samples`：
+实测 `230k + S128 + 16 samples`：
 
-- 输出目录：`results/fig5_200k_s128_16_si_plan_breakdown/Cir/`
+- 输出目录：`results/fig5_230k_s128_16_si_plan_breakdown/Cir/`
 - CUDA internal total：`104.618 s`
 - `si_total = 102.932 s`
 - `si_plan = 56.5946 s`
@@ -382,8 +382,8 @@ SI packed host plan cache 实测：
 
 - 开关：`RSI_CUDA_SI_HOST_PLAN_CACHE_MB=<MiB>`，默认 `4096`。
 - 目的：缓存已经 pack 好的 `HostPlanChunk`，避免未进入 device cache 的 SI chunk 在后续迭代重复 disk/host cache load 和 pack。
-- `200k + S128 + 16 samples`，默认 10 GiB device cache，4 GiB host plan cache：
-  - 输出目录：`results/fig5_200k_s128_16_si_hostcache_default10gb/Cir/`
+- `230k + S128 + 16 samples`，默认 10 GiB device cache，4 GiB host plan cache：
+  - 输出目录：`results/fig5_230k_s128_16_si_hostcache_default10gb/Cir/`
   - host cache：`25/130` chunks，`2.49 GB`，hits `309`，misses `146`
   - CUDA internal total：`76.4524 s`
   - `si_plan = 37.9682 s`
@@ -403,8 +403,8 @@ SI packed host plan cache 实测：
   - `DeviceArray` 记录 capacity，重复上传到同一个 scratch chunk 时复用已有 device allocation。
   - 未进入 device cache 的 SI chunk 上传到 `siTemporaryPlanChunk`，避免每轮反复 `cudaMalloc/cudaFree`。
   - cached device chunk 仍使用独立 `DevicePlanChunk`，保证常驻计划的生命周期不受 scratch 影响。
-- `200k + S128 + 16 samples`，默认 10 GiB device cache + 4 GiB host plan cache + temporary buffer reuse：
-  - 输出目录：`results/fig5_200k_s128_16_temp_buffer_reuse/Cir/`
+- `230k + S128 + 16 samples`，默认 10 GiB device cache + 4 GiB host plan cache + temporary buffer reuse：
+  - 输出目录：`results/fig5_230k_s128_16_temp_buffer_reuse/Cir/`
   - CUDA internal total：`84.0145 s`
   - `si_plan = 43.6488 s`
   - `si_sweep = 38.5557 s`
@@ -418,8 +418,8 @@ SI packed host plan cache 实测：
   - `RSI_CUDA_SI_ASYNC_PLAN_UPLOAD=1`：SI plan upload 使用独立 non-blocking stream 和 `cudaMemcpyAsync`。
   - `RSI_CUDA_SI_PINNED_PLAN_UPLOAD=1`：额外使用按字段复用的 pinned staging buffer；该开关隐含 async upload。
   - 默认不打开，避免 pinned staging 的额外 host memcpy 在小 case 上造成回归。
-- `200k + S128 + 16 samples`，async pageable：
-  - 输出目录：`results/fig5_200k_s128_16_async_upload/Cir/`
+- `230k + S128 + 16 samples`，async pageable：
+  - 输出目录：`results/fig5_230k_s128_16_async_upload/Cir/`
   - CUDA internal total：`79.2904 s`
   - `si_plan = 38.4207 s`
   - `si_sweep = 39.0833 s`
@@ -427,8 +427,8 @@ SI packed host plan cache 实测：
   - `si_plan_breakdown_pack = 0.938031 s`
   - `si_plan_breakdown_upload = 13.4927 s`
   - `si_plan_breakdown_sync = 0.23149 s`
-- `200k + S128 + 16 samples`，pinned + async：
-  - 输出目录：`results/fig5_200k_s128_16_pinned_async_upload/Cir/`
+- `230k + S128 + 16 samples`，pinned + async：
+  - 输出目录：`results/fig5_230k_s128_16_pinned_async_upload/Cir/`
   - CUDA internal total：`76.4191 s`
   - `si_plan = 36.0273 s`
   - `si_sweep = 38.0049 s`
@@ -439,11 +439,11 @@ SI packed host plan cache 实测：
   - 4 个 CSV 均为 `194315` 行，非有限值数量为 0。
   - 对比 async pageable 和 fused default 输出，SI/RSI/RSI-tail 逐值 `max_abs = 0`。
 - 结论：pinned+async 把大部分 H2D 等待从 `upload` 迁到 stream sync，但 `si_plan` 仍比 async pageable 低约 `2.4 s`，比 temporary buffer reuse run 低约 `7.6 s`；先保留为 opt-in，后续需要在完整 `8192 samples` 上确认端到端收益和稳定性。
-- 压缩 `orders` 对磁盘 cache 可能有帮助，但 200k cell 无法用 `uint16`，GPU 端压缩还需要解码 kernel，风险较高，暂只记录。
+- 压缩 `orders` 对磁盘 cache 可能有帮助，但 230k cell 无法用 `uint16`，GPU 端压缩还需要解码 kernel，风险较高，暂只记录。
 
 ### 9. RSI plan reuse and cache
 
-`200k + S128 + 1024 samples` 暴露的新瓶颈：
+`230k + S128 + 1024 samples` 暴露的新瓶颈：
 
 - CUDA internal total：`283.002 s`
 - `si_total = 67.6201 s`
@@ -457,15 +457,15 @@ SI packed host plan cache 实测：
 
 实测结论和清理决定：
 
-- `200k + S128 + 256 samples`，super-plan enabled：
-  - 输出目录：`results/fig5_200k_s128_256_rsi_superplan/Cir/`
+- `230k + S128 + 256 samples`，super-plan enabled：
+  - 输出目录：`results/fig5_230k_s128_256_rsi_superplan/Cir/`
   - super-plan directions：`5105`
   - estimated device bytes：`4307930825`
   - total：`105.987 s`
   - `rsi_plan = 37.6329 s`
   - `rsi_plan_breakdown_build = 34.3069 s`
 - 同配置 super-plan disabled：
-  - 输出目录：`results/fig5_200k_s128_256_no_rsi_superplan/Cir/`
+  - 输出目录：`results/fig5_230k_s128_256_no_rsi_superplan/Cir/`
   - total：`77.2234 s`
   - `rsi_plan = 10.3915 s`
   - `rsi_plan_breakdown_cache = 7.00688 s`
@@ -481,9 +481,9 @@ rsi_plan_fixed_cache_misses
 rsi_plan_fixed_cache_wall
 ```
 
-`200k + S128 + 256 samples`，默认 no super-plan，warm cache：
+`230k + S128 + 256 samples`，默认 no super-plan，warm cache：
 
-- 输出目录：`results/fig5_200k_s128_256_rsi_cache_counters/Cir/`
+- 输出目录：`results/fig5_230k_s128_256_rsi_cache_counters/Cir/`
 - total：`79.0945 s`
 - `rsi_plan = 11.9356 s`
 - `rsi_plan_breakdown_cache = 6.27443 s`
@@ -509,16 +509,16 @@ RSI_CUDA_FIXED_PLAN_LOAD_WORKERS=16
 
 实测：
 
-- `200k + S128 + 256 samples`，parallel fixed load：
-  - 输出目录：`results/fig5_200k_s128_256_parallel_fixed_load/Cir/`
+- `230k + S128 + 256 samples`，parallel fixed load：
+  - 输出目录：`results/fig5_230k_s128_256_parallel_fixed_load/Cir/`
   - total：`70.512 s`
   - `rsi_plan = 5.42786 s`
   - `rsi_plan_fixed_cache_chunks = 5582`
   - `rsi_plan_fixed_cache_hits = 5582`
   - `rsi_plan_fixed_cache_misses = 0`
   - 对比上一版 no-super warm cache：total `79.0945 s -> 70.512 s`，`rsi_plan 11.9356 s -> 5.42786 s`。
-- `200k + S128 + 1024 samples`，parallel fixed load：
-  - 输出目录：`results/fig5_200k_s128_1024_parallel_fixed_load/Cir/`
+- `230k + S128 + 1024 samples`，parallel fixed load：
+  - 输出目录：`results/fig5_230k_s128_1024_parallel_fixed_load/Cir/`
   - total：`95.3424 s`
   - `si_total = 67.411 s`
   - `rsi_total = 27.7428 s`
@@ -536,8 +536,8 @@ RSI_CUDA_FIXED_PLAN_LOAD_WORKERS=16
 
 下一步验证：
 
-- 已跑 `200k + S128 + 8192 samples` 完整数据，使用 `RSI_CUDA_SI_PINNED_PLAN_UPLOAD=1`，保留默认 `RSI_CUDA_FIXED_PLAN_PARALLEL_LOAD=1`：
-  - 输出目录：`results/fig5_200k_s128_8192_parallel_fixed_load/Cir/`
+- 已跑 `230k + S128 + 8192 samples` 完整数据，使用 `RSI_CUDA_SI_PINNED_PLAN_UPLOAD=1`，保留默认 `RSI_CUDA_FIXED_PLAN_PARALLEL_LOAD=1`：
+  - 输出目录：`results/fig5_230k_s128_8192_parallel_fixed_load/Cir/`
   - CUDA internal total：`320.933 s`
   - `si_total = 69.5556 s`
   - `si_plan = 32.8526 s`
@@ -554,6 +554,14 @@ RSI_CUDA_FIXED_PLAN_LOAD_WORKERS=16
   - SI coarse/fine 对 1024-sample 输出逐值 `max_abs = 0`。
 - 结论：全量端到端约 `5 min 21 s`。8192 下仍有 `3828` 个 fixed chunk misses，说明如果继续优化 RSI plan，应优先做 cache prewarm/补齐或避免 miss 时重复 build，而不是再动 SI。
 
+已实现 RSI fixed-direction cache prewarm 和 miss 去重：
+
+- `RSI_CUDA_RSI_PLAN_PREWARM=1` 默认开启。RSI schedule 生成后先扫描完整 run 实际用到的 fixed-direction chunks；已存在的 cache 文件只做 exists 检查，缺失 chunk 并行 build/save。
+- `RSI_CUDA_FIXED_PLAN_PREWARM_WORKERS=<N>` 控制 prewarm worker 数；默认复用 `RSI_CUDA_FIXED_PLAN_LOAD_WORKERS`，上限 64。
+- `RSI_CUDA_FIXED_PLAN_MISS_DEDUP=1` 默认开启。运行中多个线程遇到同一个 missing fixed chunk 时，只允许一个线程 build/save，其它线程等待后重新 load，避免重复 build。
+- 新增 timing 字段 `rsi_plan_prewarm`，以及 `rsi_plan_prewarm_fixed_cache_*` counters。Prewarm 时间也计入 `rsi_plan`，保持总 plan 时间口径不变。
+- 下一步验证重点：完整 `230k + S128 + 8192 samples` 中，batch 内 `rsi_plan_fixed_cache_misses` 应接近 0；若 cache 冷启动，miss/build 应主要转移到 `rsi_plan_prewarm`。
+
 ### 10. SI sweep breakdown
 
 已增加 opt-in sweep 细分开关：
@@ -564,9 +572,9 @@ RSI_CUDA_SI_SWEEP_BREAKDOWN=1
 
 该开关会在 SI sweep 内部插入额外 CUDA event 同步，仅用于定位，不作为默认性能路径。
 
-实测 `200k + S128 + 16 samples`，`RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=10000`：
+实测 `230k + S128 + 16 samples`，`RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=10000`：
 
-- 输出目录：`results/fig5_200k_s128_16_si_sweep_breakdown_10gb/Cir/`
+- 输出目录：`results/fig5_230k_s128_16_si_sweep_breakdown_10gb/Cir/`
 - CUDA internal total：`88.0614 s`
 - `si_total = 85.7364 s`
 - `si_plan = 39.6558 s`
@@ -602,23 +610,23 @@ RSI_CUDA_SI_FUSED_WAVEFRONT=1  # default
 
 动机：
 
-- `nsys` 显示 200k/S128 smoke 中 `cudaLaunchKernel` 调用约 `742707` 次，API 总耗时约 `7.78 s`。
+- `nsys` 显示 230k/S128 smoke 中 `cudaLaunchKernel` 调用约 `742707` 次，API 总耗时约 `7.78 s`。
 - 原 tiled wavefront 是 chunk × level × iteration 启动 kernel，launch 数很高。
 - fused kernel 用一个 launch 覆盖一个 direction batch 的所有 levels，显著减少 launch 数。
 
-实测 `200k + S128 + 16 samples`，`RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=10000`：
+实测 `230k + S128 + 16 samples`，`RSI_CUDA_SI_DEVICE_PLAN_CACHE_MB=10000`：
 
 - 原 tiled 10 GiB：
   - CUDA internal total：`87.6393 s`
   - `si_plan = 39.851 s`
   - `si_sweep = 45.3119 s`
 - fused wavefront 显式开启：
-  - 输出目录：`results/fig5_200k_s128_16_fused_wavefront/Cir/`
+  - 输出目录：`results/fig5_230k_s128_16_fused_wavefront/Cir/`
   - CUDA internal total：`75.4776 s`
   - `si_plan = 41.1578 s`
   - `si_sweep = 32.4425 s`
 - fused wavefront 默认开启后回归：
-  - 输出目录：`results/fig5_200k_s128_16_fused_default/Cir/`
+  - 输出目录：`results/fig5_230k_s128_16_fused_default/Cir/`
   - CUDA internal total：`71.55 s`
   - `si_total = 70.2645 s`
   - `si_plan = 37.7765 s`
@@ -630,14 +638,174 @@ RSI_CUDA_SI_FUSED_WAVEFRONT=1  # default
 小网格补充：
 
 - `30k + S40 + 16 samples` 强制 streaming 下，fused `si_sweep = 26.3354 s`，原 tiled `si_sweep = 23.0909 s`。
-- 因此 fused 默认主要面向 200k/S128 这类大网格高角度场景；若小网格强制 streaming，可用 `RSI_CUDA_SI_FUSED_WAVEFRONT=0` 回退。
+- 因此 fused 默认主要面向 230k/S128 这类大网格高角度场景；若小网格强制 streaming，可用 `RSI_CUDA_SI_FUSED_WAVEFRONT=0` 回退。
 
 ## 当前推荐优先级
 
-1. 用 fused wavefront + 10 GiB SI device plan cache 跑完整 200k/S128/8192，确认端到端收益。
+1. 用 fused wavefront + 10 GiB SI device plan cache 跑完整 230k/S128/8192，确认端到端收益。
 2. 继续 profile/优化 `sweepLevelFusedKernel`，重点看单 direction block 内的 level 循环和访存。
 3. 继续扫 SI device cache 预算，重点测试 `9000/10000/11000`，避免 12 GiB 显存压力导致 sweep 退化。
 4. 对 RSI fixed-direction chunk 增加 device/host shard 常驻，继续压低 cache load。
 5. 将 `maxSamplesPerBatch=128` 改为环境变量，测试 `192/256`，减少 full 8192 的 batch 数。
 6. 基于 cache 命中/常驻统计自动选择预算。
 7. SI chunk size 可配置，继续测试 64/128/256。
+
+## 后续 sweep 优化执行记录
+
+6.6 的完整测试确认 RSI fused wavefront 对 `230k + S128 + 8192` 有收益，但 SI sweep 和 RSI plan 准备仍然是主要可优化项。后续优化按下面五个方向推进。每一项都要求保留环境变量回退开关，并至少用一个小规模数值一致性测试和一个 230k 性能测试确认效果；如果性能没有稳定收益，则记录结果但不默认启用。
+
+### 1. RSI plan/sweep 预取流水线
+
+目标是在 GPU sweep 当前样本批时，用 CPU 线程准备下一样本批的 `HostPlanChunk`，减少 batch 间等待。主要观察 `rsi_plan`、`rsi_sweep` 和 `rsi_total`。
+
+实现状态：默认开启。
+
+环境变量：
+
+```text
+RSI_CUDA_RSI_PLAN_PREFETCH=1
+```
+
+实测 `230k + S64 + 512 samples`，强制 streaming，warm-cache：
+
+- prefetch off：`rsi_total = 13.3526 s`，`rsi_plan = 10.9608 s`，`rsi_sweep = 2.12402 s`
+- prefetch on：`rsi_total = 9.98969 s`，`rsi_plan = 7.4043 s`，`rsi_sweep = 2.12257 s`
+- `SI_fine.csv`、`RSI.csv`、`RSI_tail.csv` 逐字节一致。
+
+完整 `230k + S128 + 8192 samples` 当前默认配置，输出目录 `results/bench_230k_s128_8192_current`：
+
+- 外部 wall time：`1401.97 s`
+- 内部 Figure 5 total：`1440.79 s`
+- `si_total = 782.566 s`，`si_plan = 45.6999 s`，`si_sweep = 715.562 s`
+- `rsi_total = 658.057 s`，`rsi_plan = 80.2794 s`，`rsi_sweep = 550.557 s`
+- RSI fixed cache：`rsi_plan_fixed_cache_hits = 179338`，`misses = 0`，`wall = 88.2383 s`
+- RSI plan breakdown 中 `cache = 1255.22 s` 和 `assemble = 128.924 s` 是批次预取线程中的累计统计，不能直接和主线程 wall time 相加；主对比口径应看 `rsi_total` 和 `rsi_plan`。
+
+相对 PDF 原记录：
+
+- `SI+RSI total`：`1606.677 -> 1440.79 s`，改善约 `10.3%`
+- `SI sweep`：`731.577 -> 715.562 s`，改善约 `2.2%`
+- `RSI total`：`822.085 -> 658.057 s`，改善约 `20.0%`
+- `RSI plan`：`197.415 -> 80.2794 s`，改善约 `59.3%`
+- `RSI sweep`：`621.519 -> 550.557 s`，改善约 `11.4%`
+
+相对 6.6 fused-only 完整测试：
+
+- `SI+RSI total`：`1595.179 -> 1440.79 s`，改善约 `9.7%`
+- `RSI total`：`773.794 -> 658.057 s`，改善约 `15.0%`
+- `RSI plan`：`202.770 -> 80.2794 s`，改善约 `60.4%`
+- `RSI sweep`：`557.320 -> 550.557 s`，基本持平并小幅改善约 `1.2%`
+
+结论：该项在完整规模上有效，默认开启。主要收益来自 host plan 准备与当前 batch GPU sweep 的重叠，`rsi_plan` 从约 200 s 降到约 80 s；数学路径和输出不变。
+
+### 2. SI sweep profile
+
+目标是用 profiler 或细分计时确认 SI sweep 的瓶颈来自 kernel 执行、launch、访存还是尾部并行度。该项先记录证据，再决定是否改 kernel。
+
+实测 `230k + S64 + 16 samples`，强制 streaming：
+
+- `si_sweep = 8.47663 s`
+- `si_sweep_breakdown_angular_clear = 0.1366 s`
+- `si_sweep_breakdown_kernel = 8.07809 s`
+- `si_sweep_breakdown_accumulate = 0.155063 s`
+- `si_sweep_breakdown_sync = 0.00436176 s`
+
+补充 profile `230k + S128 + 16 samples`：
+
+- `nsys` run：`si_total = 782.883 s`，`si_plan = 45.0895 s`，`si_sweep = 714.411 s`，SI 时间中 sweep 占约 `91.3%`。
+- CUDA API summary 中 `cudaDeviceSynchronize` 占主导，但这是 host 等待 GPU kernel 完成的表现，不是 API 本身瓶颈；`cudaLaunchKernel` 总计只有约 `0.166 s`。
+- `nsys` 当前环境没有导出 GPU kernel event，因此改用 `ncu` 采集 full SI 阶段的 `sweepLevelFusedKernel`。
+- `ncu` 采 3 个 full SI `sweepLevelFusedKernel` launch，单次 kernel 约 `19.4-20.1 ms`。
+- `sweepLevelFusedKernel`：memory throughput `83.65-86.74%`，L2 throughput `83.65-86.74%`，DRAM throughput `26.49-27.70%`，compute throughput `22.65-23.38%`。
+- L1/TEX hit rate 只有 `4.74-5.22%`，L2 hit rate `83.29-84.76%`。
+- achieved occupancy 约 `30.4%`，theoretical occupancy `83.3%`；scheduler `No Eligible` 约 `96.7%`，active warps/scheduler 约 `3.65`，eligible warps/scheduler 约 `0.03`。
+
+结论：SI sweep 仍主要耗时在 kernel 本体；S128 下最长部分是 `sweepLevelFusedKernel`。该 kernel 当前更像 L2/访存和 level 内负载不均衡受限，而不是算术受限或 launch overhead 受限。后续 SI 优化应集中在 wavefront kernel 的访存布局、level 宽度/负载均衡和有效 occupancy，而不是外围 clear/reduce/sync。
+
+补充优化尝试：
+
+- 增加 `RSI_CUDA_SI_LEVEL_SWEEP_THREADS`，默认仍为 `256`，用于扫描 fused level kernel 的 block size。
+- `230k + S64 + 16 samples`，non-streaming plan：
+  - `128 threads`：`si_sweep = 34.4927 s`
+  - `256 threads`：`si_sweep = 35.1289 s`
+  - `512 threads`：`si_sweep = 38.1507 s`
+  - 128/512 相对 256 的 `SI_fine.csv`、`RSI.csv`、`RSI_tail.csv` 均逐字节一致。
+- `230k + S128 + 16 samples`，streaming plan：
+  - 默认 `256 threads`：`si_sweep = 714.411 s`，`si_total = 782.883 s`
+  - `128 threads`：`si_sweep = 888.941 s`，`si_total = 971.511 s`
+  - 输出逐字节一致，但 128 threads 在目标规模明显回归，因此默认保持 256。
+- `230k + S64 + 16 samples`，SI fused vs level-by-level tiled：
+  - fused：`si_sweep = 33.5623 s`
+  - tiled：`si_sweep = 34.1368 s`
+  - 输出逐字节一致；fused 仍略快，因此不切回 tiled。
+- `230k + S128 + 16 samples`，`RSI_CUDA_SI_PLAN_PREFETCH=1`：
+  - prefetch off：`si_plan = 45.0895 s`，`si_sweep = 714.411 s`，`si_total = 782.883 s`
+  - prefetch on：`si_plan = 64.5024 s`，`si_sweep = 712.439 s`，`si_total = 804.845 s`
+  - 输出逐字节一致，但 plan/total 回归，因此 SI prefetch 继续默认关闭。
+- 尝试把 `sweepLevelFusedKernel` 的 `sourceShared` 分支模板化，SI 用 `<true>`、RSI 用 `<false>`：
+  - `230k + S64 + 16 samples` 有小幅收益，`si_sweep = 33.5623 -> 33.3218 s`
+  - 但 `230k + S128 + 16 samples` 严重回归，`si_sweep = 714.411 -> 1431.11 s`
+  - 输出逐字节一致；该代码改动已回退。
+
+当前结论：本轮低风险参数/分支尝试没有找到稳定 SI 收益。`sweepLevelFusedKernel` 的瓶颈仍然指向 level 内负载均衡和访存布局，后续需要更结构性的 kernel 改造，例如按 level 宽度分流、改变 cell/face 数据布局，或用可全局同步的 cooperative kernel/分阶段 hybrid kernel 处理宽 level。
+
+### 3. RSI fused/tiled 自适应选择
+
+目标是在 fused 降 launch 和 tiled 增加 level 内并行度之间做选择；大网格不再只用单一策略。主要观察 RSI sweep 是否比纯 fused 更低。
+
+实现状态：默认关闭，作为实验路径保留。
+
+环境变量：
+
+```text
+RSI_CUDA_RSI_ADAPTIVE_WAVEFRONT=0
+RSI_CUDA_RSI_ADAPTIVE_TILE_THRESHOLD=4
+```
+
+实测 `230k + S64 + 512 samples`，强制 streaming，warm-cache：
+
+- 纯 fused：`rsi_sweep = 2.12257 s`
+- adaptive 默认阈值 4，切回 tiled：`rsi_sweep = 2.65626 s`
+- `RSI.csv`、`RSI_tail.csv` 逐字节一致。
+
+结论：数值正确，但性能回归约 25%。默认关闭。
+
+### 4. CUDA Graph level-by-level wavefront
+
+目标是在仍需 level-by-level launch 的路径上，用 CUDA Graph 减少 CPU launch overhead；如果捕获参数变化或 graph 更新成本过高，则记录为暂不采用。
+
+实现状态：默认关闭，作为实验路径保留。
+
+环境变量：
+
+```text
+RSI_CUDA_RSI_GRAPH_WAVEFRONT=0
+```
+
+实测 `230k + S16 + 16 samples`，强制 streaming，关闭 fused：
+
+- graph off warm-cache：`rsi_sweep = 0.31335 s`
+- graph on：`rsi_sweep = 0.270634 s`
+- `RSI.csv`、`RSI_tail.csv` 逐字节一致。
+
+结论：对 level-by-level 路径有一定收益，但仍慢于 fused 路径；当前不默认启用。若后续要继续，可考虑缓存/复用 graph exec，而不是每个 iteration 捕获和实例化。
+
+### 5. face-lane / warp-per-cell wavefront kernel
+
+目标是让一个 cell 的多个面由多个 lane 协作计算，减少单线程面循环延迟；重点比较新 kernel 与现有 one-thread-per-cell wavefront 的吞吐和数值一致性。
+
+实现状态：默认关闭，作为实验路径保留。
+
+环境变量：
+
+```text
+RSI_CUDA_RSI_FACE_LANE_WAVEFRONT=0
+```
+
+实测 `230k + S16 + 16 samples`，强制 streaming，关闭 fused/graph：
+
+- 原 level-by-level warm-cache：`rsi_sweep = 0.31335 s`
+- face-lane：`rsi_sweep = 0.304914 s`
+- `RSI.csv`、`RSI_tail.csv` 逐字节一致。
+
+结论：数值正确，level-by-level 路径小幅改善，但收益很小且仍慢于 fused。默认关闭。

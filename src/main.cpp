@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <filesystem>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -37,18 +38,53 @@ static void printUsage(const char* prog) {
     std::cerr
         << "用法:\n"
         << "  " << prog << " [cells.csv faces.csv [figure2_data.csv] [rectangle|circle]]\n"
-        << "  " << prog << " --source-shape rectangle|circle [--gpu] [--out figure2_data.csv] [--figure5-dir examples/csv_data] [--figure5-fine-sn 32] [--figure5-samples 512] [--only all|figure2|figure5|sweep-stats] [cells.csv faces.csv]\n";
+        << "  " << prog << " --source-shape rectangle|circle [--gpu] [--out figure2_data.csv] [--figure5-dir Data/csv_data] [--figure5-fine-sn 32] [--figure5-samples 512] [--figure2-angular-list 16,128] [--figure2-samples-list 8,16,32,64,128,256,512,1024,2048,4096,8192] [--figure2-scattering-list isotropic,anisotropic] [--only all|figure2|figure2-gpu-convergence|figure5|sweep-stats] [cells.csv faces.csv]\n";
+}
+
+static std::vector<int> parseIntList(const std::string& text) {
+    std::vector<int> values;
+    std::stringstream ss(text);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) {
+            throw std::runtime_error("整数列表中存在空项: " + text);
+        }
+        values.push_back(std::stoi(item));
+    }
+    if (values.empty()) {
+        throw std::runtime_error("整数列表不能为空");
+    }
+    return values;
+}
+
+static std::vector<std::string> parseStringList(const std::string& text) {
+    std::vector<std::string> values;
+    std::stringstream ss(text);
+    std::string item;
+    while (std::getline(ss, item, ',')) {
+        if (item.empty()) {
+            throw std::runtime_error("字符串列表中存在空项: " + text);
+        }
+        values.push_back(item);
+    }
+    if (values.empty()) {
+        throw std::runtime_error("字符串列表不能为空");
+    }
+    return values;
 }
 
 int main(int argc, char** argv) {
-    std::string cellsFile = "data/cells.csv";
-    std::string facesFile = "data/faces.csv";
-    std::string outFile = "examples/figure2_data.csv";
-    std::string figure5Dir = "examples/csv_data";
+    std::string cellsFile = "Data/gmsh/cells.csv";
+    std::string facesFile = "Data/gmsh/faces.csv";
+    std::string outFile = "Data/csv_data/figure2_data.csv";
+    std::string figure5Dir = "Data/csv_data";
     std::string sourceShape = "rectangle";
     std::string only = "all";
     int figure5FineSN = 32;
     int figure5Samples = 512;
+    std::vector<int> figure2AngularList = {16, 128};
+    std::vector<int> figure2SamplesList = {8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192};
+    std::vector<std::string> figure2ScatteringList = {"isotropic", "anisotropic"};
     bool useGPU = false;
 
     std::vector<std::string> positional;
@@ -90,6 +126,24 @@ int main(int argc, char** argv) {
                 return 1;
             }
             figure5Samples = std::stoi(argv[++i]);
+        } else if (arg == "--figure2-angular-list") {
+            if (i + 1 >= argc) {
+                printUsage(argv[0]);
+                return 1;
+            }
+            figure2AngularList = parseIntList(argv[++i]);
+        } else if (arg == "--figure2-samples-list") {
+            if (i + 1 >= argc) {
+                printUsage(argv[0]);
+                return 1;
+            }
+            figure2SamplesList = parseIntList(argv[++i]);
+        } else if (arg == "--figure2-scattering-list") {
+            if (i + 1 >= argc) {
+                printUsage(argv[0]);
+                return 1;
+            }
+            figure2ScatteringList = parseStringList(argv[++i]);
         } else if (arg == "--gpu") {
             useGPU = true;
         } else if (arg == "--help" || arg == "-h") {
@@ -125,15 +179,30 @@ int main(int argc, char** argv) {
         if (!isSourceShape(sourceShape)) {
             throw std::runtime_error("入射区域形状必须是 rectangle 或 circle");
         }
-        if (only != "all" && only != "figure2" && only != "figure5" &&
-            only != "sweep-stats") {
-            throw std::runtime_error("--only 必须是 all、figure2、figure5 或 sweep-stats");
+        if (only != "all" && only != "figure2" && only != "figure2-gpu-convergence" &&
+            only != "figure5" && only != "sweep-stats") {
+            throw std::runtime_error("--only 必须是 all、figure2、figure2-gpu-convergence、figure5 或 sweep-stats");
         }
         if (figure5FineSN < 2 || figure5FineSN % 2 != 0) {
             throw std::runtime_error("--figure5-fine-sn 必须是 >=2 的偶数");
         }
         if (figure5Samples <= 0) {
             throw std::runtime_error("--figure5-samples 必须为正整数");
+        }
+        for (int angularN : figure2AngularList) {
+            if (angularN < 2 || angularN % 2 != 0) {
+                throw std::runtime_error("--figure2-angular-list 中的每个 S_N 阶数必须是 >=2 的偶数");
+            }
+        }
+        for (int samples : figure2SamplesList) {
+            if (samples <= 0) {
+                throw std::runtime_error("--figure2-samples-list 中的每个样本数必须为正整数");
+            }
+        }
+        for (const std::string& scattering : figure2ScatteringList) {
+            if (scattering != "isotropic" && scattering != "anisotropic") {
+                throw std::runtime_error("--figure2-scattering-list 只能包含 isotropic 或 anisotropic");
+            }
         }
 
         Mesh mesh = Mesh::readCSV(cellsFile, facesFile);
@@ -178,10 +247,47 @@ int main(int argc, char** argv) {
                 }
             }
 
+            const std::filesystem::path outPath(outFile);
+            if (outPath.has_parent_path()) {
+                std::filesystem::create_directories(outPath.parent_path());
+            }
             std::ofstream fout(outFile);
             fout << "scattering,M,S,iterationN,e_RSI_N\n";
             for (const auto& r : allRows) {
                 fout << r.scattering << ',' << r.M << ',' << r.S << ',' << r.iterationN << ',' << r.eRSI << '\n';
+            }
+            std::cout << "已输出: " << outFile << "\n";
+        }
+
+        if (only == "figure2-gpu-convergence") {
+            const std::filesystem::path outPath(outFile);
+            if (outPath.has_parent_path()) {
+                std::filesystem::create_directories(outPath.parent_path());
+            }
+            std::ofstream fout(outFile);
+            fout << "scattering,M,S,iterationN,e_RSI_N\n";
+            fout.flush();
+
+            for (const std::string& scattering : figure2ScatteringList) {
+            for (int angularN : figure2AngularList) {
+                RSIConfig cfg;
+                cfg.groupCount = 1;
+                cfg.angularN = angularN;
+                cfg.maxSIters = 80;
+                cfg.siTolerance = 1e-10;
+                cfg.sampleCounts = figure2SamplesList;
+                cfg.scattering = scattering;
+                cfg.sourceShape = sourceShape;
+                cfg.seed = 20260514u;
+                cfg.useGPU = true;
+                RSISolver solver(mesh, cfg);
+                auto rows = solver.runFigure2GPUConvergence();
+                for (const auto& r : rows) {
+                    fout << r.scattering << ',' << r.M << ',' << r.S << ','
+                         << r.iterationN << ',' << r.eRSI << '\n';
+                }
+                fout.flush();
+            }
             }
             std::cout << "已输出: " << outFile << "\n";
         }

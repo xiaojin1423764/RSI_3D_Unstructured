@@ -11,8 +11,8 @@
 #include <vector>
 
 int main(int argc, char** argv) {
-    const std::string cells = argc > 1 ? argv[1] : "gmsh_work/data/cells.csv";
-    const std::string faces = argc > 2 ? argv[2] : "gmsh_work/data/faces.csv";
+    const std::string cells = argc > 1 ? argv[1] : "Data/gmsh/cells.csv";
+    const std::string faces = argc > 2 ? argv[2] : "Data/gmsh/faces.csv";
     const int angularN = argc > 3 ? std::stoi(argv[3]) : 4;
     const int samples = argc > 4 ? std::stoi(argv[4]) : 8;
     const int N = argc > 5 ? std::stoi(argv[5]) : 3;

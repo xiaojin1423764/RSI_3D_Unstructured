@@ -12,6 +12,8 @@ struct CudaFigure5Result {
     std::vector<double> siFine;
     std::vector<double> rsi;
     std::vector<double> rsiTail;
+    std::vector<int> rsiCheckpointSamples;
+    std::vector<std::vector<double>> rsiCheckpoints;
     int convergedN = 0;
 };
 
@@ -36,7 +38,9 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     int maxSIters,
     double siTolerance,
     int sampleCount,
-    int tailExtra
+    int tailExtra,
+    const std::vector<int>& rsiCheckpoints = {},
+    bool anisotropicScattering = false
 );
 
 std::vector<double> runSIFieldCuda(
