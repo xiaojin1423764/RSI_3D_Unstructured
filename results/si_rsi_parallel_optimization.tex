@@ -917,7 +917,7 @@ Nsight Systems kernel & GPU time share & instances & total GPU time/s\\
 \bottomrule
 \end{tabular}}
 
-Nsight Compute 对两个主导 kernel 各采一个代表性 launch；这些硬件计数用于衡量实际活跃 warp、缓存层级和 launch 尺度，不能由累计 block 数替代。\code{sweepSamplesKernel} 的采样 grid 只有 1 个 block，表明 cyclic/fallback 路径存在严重的单 block 低占用；\code{sweepLevelFusedKernel} 的 grid 为 128 个 block，仍只有 $0.37$ waves/SM，且其 L1 命中率低、L2 命中率高，符合 L2/访存和 wavefront 负载受限的特征。
+Nsight Compute 对两个主导 kernel 各采一个代表性 launch；这些硬件计数用于衡量实际活跃 warp、缓存层级和 launch 尺度，不能由累计 block 数替代。\code{sweepSamplesKernel} 与 \code{sweepLevelFusedKernel} 都由 SI fine 和 RSI 路径复用，现有 kernel-name 采样没有 NVTX 方法标签，故不能把单次采样严格归属给 SI 或 RSI；SI 专属判断以下面的完整运行计时、plan cache 和 launch 几何为准。\code{sweepSamplesKernel} 的采样 grid 只有 1 个 block，表明某些 cyclic/fallback launch 存在严重的单 block 低占用；\code{sweepLevelFusedKernel} 的 grid 为 128 个 block，仍只有 $0.37$ waves/SM，且其 L1 命中率低、L2 命中率高，符合 L2/访存和 wavefront 负载受限的特征。
 
 {\scriptsize\setlength{\tabcolsep}{2.8pt}
 \begin{tabular}{lrrrrrrrr}
@@ -929,13 +929,13 @@ NCU sampled kernel & grid & block & achieved/theoretical occ. & waves/SM & L1 hi
 \bottomrule
 \end{tabular}}
 
-两次 NCU 采样还分别报告约 $39\%$ 和 $75\%$ 的 global-memory sectors 为 excessive/uncoalesced。优化优先级因此为：先减少 cyclic \code{sweepSamplesKernel} 的低 grid 规模或将其与其他样本合并，再改善 fused wavefront 的全局访问合并度和 level 内负载均衡；单纯增加 block 数不能解决这两类瓶颈。
+两次 NCU 采样还分别报告约 $39\%$ 和 $75\%$ 的 global-memory sectors 为 excessive/uncoalesced。优化优先级因此为：先减少 cyclic \code{sweepSamplesKernel} 的低 grid 规模或将其与其他方向/样本合并，再改善 SI/RSI 共用 fused wavefront 的全局访问合并度和 level 内负载均衡；单纯增加 block 数不能解决这两类瓶颈。若需把 occupancy 和缓存命中率精确拆给 SI 与 RSI，应增加 NVTX range 或 SI-only profile。
 
 \paragraph{数据、含义与结论汇总}
 
-下表将本节中容易混淆的计时、launch 几何和硬件计数统一解释。除 NCU 的两个代表性 launch 外，其余数据均来自 30k/$S_{224}$/4,096/$B=128$ 的完整运行；NCU 单次采样只用于定位瓶颈，不能外推为每个 kernel 实例的精确平均值。
+下表将本节中容易混淆的计时、launch 几何和硬件计数统一解释。除 NCU 的两个代表性 launch 外，其余数据均来自 30k/$S_{224}$/4,096/$B=128$ 的完整运行；NCU 单次采样只用于定位瓶颈，不能外推为每个 kernel 实例的精确平均值，也不能仅据 kernel 名拆分为 SI 或 RSI。
 
-{\scriptsize\renewcommand{\arraystretch}{1.16}\setlength{\tabcolsep}{3pt}
+{\scriptsize\renewcommand{\arraystretch}{1.10}\setlength{\tabcolsep}{3pt}
 \begin{tabularx}{\linewidth}{>{\raggedright\arraybackslash}p{0.19\linewidth}>{\raggedright\arraybackslash}p{0.22\linewidth}>{\raggedright\arraybackslash}X>{\raggedright\arraybackslash}p{0.22\linewidth}}
 \toprule
 指标 & 数据 & 含义 & 结论\\
@@ -943,9 +943,11 @@ NCU sampled kernel & grid & block & achieved/theoretical occ. & waves/SM & L1 hi
 低误差最优点 & error $=1.054\%$；端到端加速 $=3.740\times$ & 在 269 组中 error 最低，且在 error $\leq2\%$ 的 23 组中端到端加速最高。 & 30k/$S_{224}$/4,096/$B=128$ 是当前精度约束下的推荐配置。\\
 工作量与单位吞吐 & SI/RSI sweep 工作量 $=708,736/98,304=7.21\times$；$E_{\rm RSI}/E_{\rm SI}=0.602\times$ & RSI 每个等价 cell-sweep 的吞吐低于 SI；但待执行的样本 sweep 数少得多。 & $3.740\times$ 加速主要来自工作量减少，不表示 RSI 单位计算更快。\\
 累计 launch 几何 & SI：7,602 launches、710,500 blocks；RSI：209,666 launches、80,314,144 blocks；均为 256 threads/block & 这是完整计算中各 kernel grid 的累加，包含方向、level、样本 batch 和 cyclic 回退的不同分解。 & RSI block 总数大于 SI 并不构成比较不公平；它不能衡量实际 SM 活跃线程或硬件利用率。\\
+SI sweep 时间与吞吐 & $N_\Omega=50,624$、$N=14$、$t_{\rm SI,sweep}=151.190$ s，占 $t_{\rm SI,total}=168.836$ s 的 $89.55\%$；$E_{\rm SI}=170.96$ Mcell-sweeps/s & SI 已完成 $708,736$ directional cell-sweeps/cell；total 时间主要由 GPU sweep 决定，norm/reduce/copy 不构成主导。 & SI 优化应首先降低波前 sweep 时间，例如提高同一 level 内并行度和访问合并度；不应把重点放在尾部归约。\\
+SI plan/cache 与 launch 形状 & 396 个方向 plan chunks；device cache hits/misses $=5,148/396$；首次读取/上传 $=6.925/6.923$ GiB，速率 $=0.760/2.561$ GiB/s；7,602 launches、710,500 blocks，即平均 93.46 blocks/launch & 方向 plan 首次物化与 H2D 传输是 SI 的固定成本；累计 block 多数来自方向块与波前层次，平均 grid 仍不足以推断每次 launch 的占用率。 & 保持 device plan cache，并优先重叠 plan 物化/传输与 sweep；SI 的真实 occupancy 需要 SI-only 或 NVTX 标记 NCU，不能由平均 blocks/launch 替代。\\
 主导 GPU 时间 & \code{sweepSamplesKernel}：$62.9\%$、560 instances；\code{sweepLevelFusedKernel}：$36.5\%$、1,281 instances；host launch API：$0.3\%$ & 时间主要花在 GPU sweep，本机 host 发射开销不是主导项。 & 优化应优先针对两个 sweep kernel 的并行度和访存，而非减少 host API 调用。\\
-cyclic/fallback 利用率 & \code{sweepSamplesKernel}: grid $=1$、block $=128$、achieved occupancy $=2.08\%$（理论 $83.33\%$） & 该代表性 launch 只有一个 block，远不足以覆盖 GPU 的 SM。 & 优先合并或批处理 cyclic/fallback 样本，减少单 block launch；仅增大每 block 线程数无效。\\
-fused wavefront 利用率与缓存 & \code{sweepLevelFusedKernel}: grid $=128$、block $=256$、occupancy $=30.35\%$、waves/SM $=0.37$、L1/L2 hit $=9.48\%/97.14\%$、DRAM $=7.16\%$ peak、uncoalesced $\approx75\%$ & wavefront 已有一定并行度，但 level 宽度不足、L1 复用低且全局访问合并度差；高 L2 hit 不等于高 DRAM 带宽利用。 & 下一步应改善 level 内负载均衡和数据布局/访问合并度，而不是依据累计 block 数继续加大 grid。\\
+cyclic/fallback 代表性利用率 & \code{sweepSamplesKernel}: grid $=1$、block $=128$、achieved occupancy $=2.08\%$（理论 $83.33\%$） & 该代表性 launch 只有一个 block，远不足以覆盖 GPU 的 SM；因 kernel 为共用实现，不能仅据此断定来源为 SI 或 RSI。 & 优先合并或批处理 cyclic/fallback 工作，减少单 block launch；仅增大每 block 线程数无效。\\
+共用 fused wavefront 代表性利用率与缓存 & \code{sweepLevelFusedKernel}: grid $=128$、block $=256$、occupancy $=30.35\%$、waves/SM $=0.37$、L1/L2 hit $=9.48\%/97.14\%$、DRAM $=7.16\%$ peak、uncoalesced $\approx75\%$ & wavefront 已有一定并行度，但 level 宽度不足、L1 复用低且全局访问合并度差；高 L2 hit 不等于高 DRAM 带宽利用。 & 这同时是 SI 与 RSI 的优化候选：改善 level 内负载均衡和数据布局/访问合并度，而不是依据累计 block 数继续加大 grid。\\
 \bottomrule
 \end{tabularx}}
 
