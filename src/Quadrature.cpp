@@ -45,20 +45,25 @@ std::vector<Ordinate> Quadrature::levelSymmetricSN(int snOrder) {
         throw std::runtime_error("level-symmetric S_N 方向数生成错误");
     }
 
-    double weightSum = 0.0;
-    Vec3 firstMoment;
+    // This is a validation-only reduction.  S316 has 100,488 directions, so
+    // double sequential summation can exceed the diagnostic tolerance even
+    // though the symmetric direction set itself is correct.
+    long double weightSum = 0.0L;
+    long double firstMomentX = 0.0L;
+    long double firstMomentY = 0.0L;
+    long double firstMomentZ = 0.0L;
     for (const auto& ord : ordinates) {
         weightSum += ord.weight;
-        firstMoment.x += ord.weight * ord.omega.x;
-        firstMoment.y += ord.weight * ord.omega.y;
-        firstMoment.z += ord.weight * ord.omega.z;
+        firstMomentX += static_cast<long double>(ord.weight) * ord.omega.x;
+        firstMomentY += static_cast<long double>(ord.weight) * ord.omega.y;
+        firstMomentZ += static_cast<long double>(ord.weight) * ord.omega.z;
     }
 
-    const double tol = 1e-12;
-    if (std::fabs(weightSum - 1.0) > tol ||
-        std::fabs(firstMoment.x) > tol ||
-        std::fabs(firstMoment.y) > tol ||
-        std::fabs(firstMoment.z) > tol) {
+    constexpr long double tol = 1e-12L;
+    if (std::fabs(weightSum - 1.0L) > tol ||
+        std::fabs(firstMomentX) > tol ||
+        std::fabs(firstMomentY) > tol ||
+        std::fabs(firstMomentZ) > tol) {
         throw std::runtime_error("level-symmetric S_N 归一化检查失败");
     }
 

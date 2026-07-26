@@ -48,8 +48,8 @@ test-gpu: gpu_consistency_test
 	./gpu_consistency_test
 
 run: $(TARGET)
-	mkdir -p examples/csv_data
-	./$(TARGET) --source-shape $(SOURCE_SHAPE) --out examples/csv_data/figure2_data.csv gmsh_work/data/cells.csv gmsh_work/data/faces.csv
+	mkdir -p Data/csv_data
+	./$(TARGET) --source-shape $(SOURCE_SHAPE) --out Data/csv_data/figure2_data.csv Data/gmsh/cells.csv Data/gmsh/faces.csv
 
 run-rec: SOURCE_SHAPE = rectangle
 run-rec: run
@@ -58,8 +58,8 @@ run-cir: SOURCE_SHAPE = circle
 run-cir: run
 
 run-figure5: $(TARGET)
-	mkdir -p examples/csv_data
-	./$(TARGET) --source-shape $(SOURCE_SHAPE) --only figure5 gmsh_work/data/cells.csv gmsh_work/data/faces.csv
+	mkdir -p Data/csv_data
+	./$(TARGET) --source-shape $(SOURCE_SHAPE) --figure5-dir Data/csv_data --only figure5 Data/gmsh/cells.csv Data/gmsh/faces.csv
 
 run-rec-figure5: SOURCE_SHAPE = rectangle
 run-rec-figure5: run-figure5
@@ -67,26 +67,13 @@ run-rec-figure5: run-figure5
 run-cir-figure5: SOURCE_SHAPE = circle
 run-cir-figure5: run-figure5
 
-plot:
-	python3 examples/plot_figures.py --only figure5
+plot: plot-figure2
 
-plot-voxel3d:
-	python3 examples/plot_figures.py --only voxel3d
-
-plot-volume3d:
-	python3 examples/plot_figures.py --only volume3d
-
-plot-isosurfaces:
-	python3 examples/plot_figures.py --only isosurfaces
-
-plot-paper-slices:
-	python3 examples/plot_figures.py --only paper-slices
-
-plot-all:
-	python3 examples/plot_figures.py
+plot-figure2:
+	python3 scripts/plot_figures.py --only figure2
 
 tecplot:
-	python3 examples/export_tecplot.py
+	python3 scripts/export_tecplot.py
 clean:
 	rm -f $(TARGET) $(GPU_TARGET) gpu_consistency_test
 	rm -rf $(GPU_BUILD_DIR)

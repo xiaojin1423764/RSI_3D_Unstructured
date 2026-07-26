@@ -11,6 +11,10 @@
 #include <vector>
 
 int main(int argc, char** argv) {
+    const std::vector<Ordinate> s316 = Quadrature::levelSymmetricSN(316);
+    if (s316.size() != 100488) {
+        throw std::runtime_error("S316 direction count regression");
+    }
     const std::string cells = argc > 1 ? argv[1] : "Data/gmsh/cells.csv";
     const std::string faces = argc > 2 ? argv[2] : "Data/gmsh/faces.csv";
     const int angularN = argc > 3 ? std::stoi(argv[3]) : 4;

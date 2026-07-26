@@ -1,5 +1,7 @@
 build/
-results/
+results/*
+!results/Figures/
+!results/Figures/**
 organized_outputs/
 
 __pycache__/

@@ -8,7 +8,7 @@
 
 | 版本 | wall time | 说明 |
 |---|---:|---|
-| CPU | 266.32 s | `gmsh_work/data`，36,470 cells |
+| CPU | 266.32 s | `Data/gmsh`，36,470 cells |
 | GPU direct-global-tail 版本 | 145.23 s | 数值逐 CSV 一致，但比旧 GPU 基线慢 |
 | GPU SI cycle-run + 5M direction batch | 75.27 s | `NVCCARCH=sm_120`，快于旧 GPU 基线 89.83 s |
 | GPU 分阶段计时版 | 78.86 s | 计时事件有少量同步开销；用于定位瓶颈 |
@@ -46,7 +46,7 @@ direct-global-tail 版本的问题：
     reduce sampleTail -> globalTailSum
 ```
 
-这样每个 batch 只做一次 tail reduce，而不是每个 tail iteration 做一次。显存占用回到每 sample 约 `3*C*sizeof(double)`，但 16 GB RTX 5070 Ti 上 30k/200k 都应仍能达到较大的 batch size；原来 200k 的约 25 samples/batch 主要来自人工 `5000000/C` 上限，不是显存硬限制。
+这样每个 batch 只做一次 tail reduce，而不是每个 tail iteration 做一次。显存占用回到每 sample 约 `3*C*sizeof(double)`，但 16 GB RTX 5070 Ti 上 30k/230k 都应仍能达到较大的 batch size；原来 230k 的约 25 samples/batch 主要来自人工 `5000000/C` 上限，不是显存硬限制。
 
 验收：
 
@@ -93,7 +93,7 @@ CUDA timing: upload=... si_total=... si_sweep=... si_reduce=... rsi_total=...
 - 如果 `rsi_direction_copy` 或 checkpoint 时间异常，优先处理 Host/Device 传输和
   checkpoint 频率。
 
-下一步先跑 30k 完整 Figure 5 确认 75.27 s 版本的阶段占比，再跑 200k 完整
+下一步先跑 30k 完整 Figure 5 确认 75.27 s 版本的阶段占比，再跑 230k 完整
 Figure 5 判断大网格瓶颈是否相同。不要在没有阶段占比前继续改 kernel。
 
 30k 分阶段计时结果：
@@ -113,11 +113,11 @@ Figure 5 判断大网格瓶颈是否相同。不要在没有阶段占比前继�
 | RSI direction copy | 0.001 s |
 
 30k 结论：剩余瓶颈几乎全部在 sweep kernel 本体，`angularPsi` 清零、方向归约、
-收敛范数、tail accumulation 和 Host/Device 拷贝都不是主要瓶颈。若 200k 也呈现
+收敛范数、tail accumulation 和 Host/Device 拷贝都不是主要瓶颈。若 230k 也呈现
 相同占比，下一步应优先做 sweep kernel / pass 结构优化或 CUDA Graph，而不是 SI
 streaming。
 
-200k 分阶段计时结果：
+230k 分阶段计时结果：
 
 | 阶段 | 时间 |
 |---|---:|
@@ -133,7 +133,7 @@ streaming。
 | RSI reduce | 0.002 s |
 | RSI direction copy | 0.005 s |
 
-200k 结论：完整 GPU Figure 5 为 `447.08 s`（`/usr/bin/time` wall 为 `460.03 s`），
+230k 结论：完整 GPU Figure 5 为 `447.08 s`（`/usr/bin/time` wall 为 `460.03 s`），
 相比旧 GPU 基线 `1417.84 s` 已明显下降。瓶颈仍然几乎全部在 sweep kernel：
 SI sweep 占总时间约 82.7%，RSI sweep 占约 14.2%。因此下一步不应优先做
 SI streaming、reduce/norm 融合或传输优化，而应优先减少 RSI/SI sweep 的无效
@@ -210,7 +210,7 @@ cell。因此 SI 虽然已有角度并行，但单方向内部没有打开 tycho
 1. 扩展 `SweepPlan`，在原有 `order` 外记录 `levelOffsets + levelCells`。
    同一 level 内的 cell upwind 依赖已经满足，可以并行计算。
 2. 先只输出统计：acyclic/cyclic 方向数、level 数、平均/最大 wavefront 宽度。
-   真实 30k/200k 网格的 level width 足够大时，才值得改 CUDA kernel。
+   真实 30k/230k 网格的 level width 足够大时，才值得改 CUDA kernel。
 3. 第一版 GPU wavefront 只处理 acyclic 方向；cyclic 方向继续使用当前
    投影排序 + 20 pass Gauss-Seidel fallback。
 4. wavefront kernel 必须保持 `angularPsi[direction*C + cell]` 布局，避免同时扰动
@@ -225,20 +225,20 @@ cell。因此 SI 虽然已有角度并行，但单方向内部没有打开 tycho
 快速统计命令：
 
 ```bash
-./rsi_unstructured --only sweep-stats gmsh_work/data/cells.csv gmsh_work/data/faces.csv
+./rsi_unstructured --only sweep-stats Data/gmsh/cells.csv Data/gmsh/faces.csv
 ```
 
 当前统计结果：
 
 | 网格 | 角度 | acyclic | cyclic | avg levels | max levels | avg width | max width |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| 30k `gmsh_work/data` | S4 | 24 | 0 | 249.583 | 264 | 146.124 | 265 |
-| 30k `gmsh_work/data` | S32 | 1086 | 2 | 230.652 | 287 | 158.117 | 570 |
-| 200k `gmsh_work/mesh200k` | S4 | 24 | 0 | 421.75 | 442 | 460.733 | 929 |
-| 200k `gmsh_work/mesh200k` | S32 | 1088 | 0 | 372.072 | 446 | 522.249 | 1759 |
+| 30k `Data/gmsh` | S4 | 24 | 0 | 249.583 | 264 | 146.124 | 265 |
+| 30k `Data/gmsh` | S32 | 1086 | 2 | 230.652 | 287 | 158.117 | 570 |
+| 230k `Data/gmsh/mesh230k` | S4 | 24 | 0 | 421.75 | 442 | 460.733 | 929 |
+| 230k `Data/gmsh/mesh230k` | S32 | 1088 | 0 | 372.072 | 446 | 522.249 | 1759 |
 
 结论：两个网格的 S32 绝大多数方向都是 acyclic，且 wavefront 平均宽度在 30k
-约 `158`、200k 约 `522`。这说明下一步值得优先做 acyclic 方向的 GPU
+约 `158`、230k 约 `522`。这说明下一步值得优先做 acyclic 方向的 GPU
 level-synchronous sweep；cyclic 方向保留现有 fallback 即可。
 
 已实现的第一版：
@@ -304,7 +304,7 @@ RSI wavefront 使 30k 完整 Figure 5 再缩短约 `7.08 s`，其中 RSI sweep �
    如果 occupancy 或 instruction throughput 低，应考虑 warp/4-lane cell 更新。
 3. Nsight Compute：抽样旧 `sweepSamplesKernel`，确认 cyclic fallback 和独立
    `runRSIFieldAtNCuda` 路径是否仍值得维护或优化。
-4. 200k 新基线：200k 的平均 wavefront width 更大，可能更受益于 level 并行，也
+4. 230k 新基线：230k 的平均 wavefront width 更大，可能更受益于 level 并行，也
    可能更受 kernel launch 数限制。必须复测后再决定 CUDA Graph / persistent
    kernel 的优先级。
 
@@ -316,7 +316,7 @@ RSI wavefront 使 30k 完整 Figure 5 再缩短约 `7.08 s`，其中 RSI sweep �
    恢复 face-lane 并行或 warp-per-cell，同时保留 level wavefront。
 3. 若 RSI iteration 里少量 cyclic direction 导致整批回退：把 samples 分为
    acyclic/cyclic 两组，acyclic 组走 wavefront，cyclic 组走旧 fallback。
-4. 若 200k 显存或 batch size 成为限制：再做 SI direction streaming；否则
+4. 若 230k 显存或 batch size 成为限制：再做 SI direction streaming；否则
    streaming 仍不是优先项。
 
 Profiling 输出约定：
@@ -363,7 +363,7 @@ level 内 cell 互不依赖，排序不改变数学结果，但改善部分 cell
    level count 跳过已结束方向。
 2. 主 run 的 uncoalesced global access：重排 mesh SoA 或在 wavefront kernel 中
    改 cell/face 映射，减少 `refFace/refNeighbor/face*` 随机访问。
-3. 旧 cyclic fallback：30k 影响小，200k S32 为 0 个 cyclic，暂不优先。
+3. 旧 cyclic fallback：30k 影响小，230k S32 为 0 个 cyclic，暂不优先。
 
 已实现 acyclic direction packing：SI wavefront 不再按 `hasCycle` 连续 run 切分，
 而是把所有 acyclic directions 一起 launch；cyclic directions 单独走旧 fallback。
@@ -377,9 +377,9 @@ level 内 cell 互不依赖，排序不改变数学结果，但改善部分 cell
 
 SI packed acyclic 使 SI sweep 再降约 `0.86 s`，但该次 RSI sweep 波动偏高，导致
 total 未改善。四个 CSV 与 level sort only 逐值一致。该改动对 SI 是正收益，
-是否作为长期默认需结合 200k 和重复 30k 运行判断。
+是否作为长期默认需结合 230k 和重复 30k 运行判断。
 
-200k 当前默认新基线：
+230k 当前默认新基线：
 
 ```text
 /usr/bin/time wall: 30.12 s
@@ -391,8 +391,8 @@ RSI total: 2.76454 s
 RSI sweep: 2.67064 s
 ```
 
-200k S32 全部 `1088` 个方向都是 acyclic，平均 wavefront width 约 `522`，因此
-wavefront 对大网格收益非常大。相比旧 200k 分阶段计时 `447.08 s`，GPU fine
+230k S32 全部 `1088` 个方向都是 acyclic，平均 wavefront width 约 `522`，因此
+wavefront 对大网格收益非常大。相比旧 230k 分阶段计时 `447.08 s`，GPU fine
 SI+RSI 部分已降到约 `5.82 s`。现在完整命令的主要剩余开销已经转移到 CUDA
 计时外。当时的主要剩余项是：
 
@@ -400,33 +400,33 @@ SI+RSI 部分已降到约 `5.82 s`。现在完整命令的主要剩余开销已�
 - S32 sweep plan 构建约 `7.56 s`。
 - CSV 写出和其他主机端流程。
 
-因此 200k 下一步不应继续先抠 GPU fine sweep，而应优先：
+因此 230k 下一步不应继续先抠 GPU fine sweep，而应优先：
 
 1. 把 Figure 5 的 coarse S4 SI 也放到 CUDA 路径，避免完整 workflow 仍被 CPU
    coarse SI 卡住。
 2. 缓存/复用 sweep plan，或把 S32 plan 构建结果序列化，避免重复运行时每次花
    数秒重建。
-3. 如需继续优化 GPU kernel，再看 200k NCU；但当前完整 workflow 已由 host 侧
+3. 如需继续优化 GPU kernel，再看 230k NCU；但当前完整 workflow 已由 host 侧
    阶段主导。
 
 已实现 workflow 优化：`--gpu --only figure5` 下，`SI_coarse` 也走 CUDA 后端。
 当前实现复用 `runFigure5GPU(1, 0)` 并只取其中的 SI 场，因此会多算一个很小的
-S4/1-sample RSI；200k 下这部分 RSI 约 `0.14 s`，可接受。后续可拆正式
+S4/1-sample RSI；230k 下这部分 RSI 约 `0.14 s`，可接受。后续可拆正式
 SI-only CUDA API 去掉这点开销。
 
-200k 实测：
+230k 实测：
 
 | 模式 | `/usr/bin/time` wall | coarse CUDA total | fine CUDA total | fine SI sweep | fine RSI sweep |
 |---|---:|---:|---:|---:|---:|
 | coarse SI on GPU | 16.60 s | 0.578428 s | 5.76225 s | 2.41558 s | 2.73349 s |
 | coarse SI on CPU | 30.12 s | n/a | 5.81625 s | 2.41999 s | 2.67064 s |
 
-coarse SI GPU 化后，200k 完整命令 wall time 降低约 `13.5 s`。四个 CSV 与
+coarse SI GPU 化后，230k 完整命令 wall time 降低约 `13.5 s`。四个 CSV 与
 coarse CPU 版本逐值一致。
 
 ## 当前后续优化计划
 
-200k 当前完整 workflow 已从 GPU sweep 主导转为 host 侧流程主导。后续优先级按
+230k 当前完整 workflow 已从 GPU sweep 主导转为 host 侧流程主导。后续优先级按
 完整命令 wall time 排序，而不是只看 CUDA internal total。
 
 ### 已完成：正式 SI-only CUDA API
@@ -451,7 +451,7 @@ std::vector<double> runSIFieldCuda(..., int& convergedN)
 
 ### 已完成：sweep plan 序列化 / 缓存
 
-200k S32 sweep plan 构建约 `7.56 s`，已经大于 fine CUDA internal total
+230k S32 sweep plan 构建约 `7.56 s`，已经大于 fine CUDA internal total
 `5.76 s`。这是当前最有价值的 host 侧优化。
 
 当前实现：
@@ -472,24 +472,24 @@ std::vector<double> runSIFieldCuda(..., int& convergedN)
 | 30k S4 | 0.0102 s | 0.0029 s | 3.5 MB |
 | 30k S32 | 0.4175 s | 0.2135 s | 159.7 MB |
 
-200k Figure 5 cache 验证，cache 目录为 `/tmp/rsi_sweep_cache_200k_0714`：
+230k Figure 5 cache 验证，cache 目录为 `/tmp/rsi_sweep_cache_230k_0714`：
 
 | 模式 | wall | S4 plan | S32 plan | fine CUDA total | fine SI sweep | fine RSI sweep |
 |---|---:|---:|---:|---:|---:|---:|
 | cold cache | 14.82 s | build 0.149 s + save 0.015 s | build 6.877 s + save 0.791 s | 5.307 s | 2.270 s | 2.529 s |
 | warm cache | 8.28 s | load 0.024 s | load 1.093 s | 5.530 s | 2.271 s | 2.542 s |
 
-Cold/warm 输出目录分别为 `/tmp/rsi_fig5_200k_cold` 和 `/tmp/rsi_fig5_200k_warm`。
+Cold/warm 输出目录分别为 `/tmp/rsi_fig5_230k_cold` 和 `/tmp/rsi_fig5_230k_warm`。
 四个 Figure 5 CSV (`SI_coarse`、`SI_fine`、`RSI`、`RSI_tail`) 已用 `cmp -s`
 确认逐字节一致。warm-cache 完整 wall time 已低于原目标 `9-10 s`。
 
-### 优先级 3：200k NCU，判断是否继续改 GPU sweep
+### 优先级 3：230k NCU，判断是否继续改 GPU sweep
 
 30k NCU 已显示 `sweepLevelKernel` 主要问题是 uncoalesced global access，excessive
-sectors 约 `77%`。200k 的 wavefront 更宽，可能暴露不同瓶颈；在 host cache 完成前，
+sectors 约 `77%`。230k 的 wavefront 更宽，可能暴露不同瓶颈；在 host cache 完成前，
 GPU kernel 不是当前最大 wall-time 来源。
 
-若继续做 GPU kernel，应先跑 200k NCU：
+若继续做 GPU kernel，应先跑 230k NCU：
 
 ```bash
 ncu --set basic --kernel-name regex:sweepLevelKernel --launch-skip ... --launch-count ...
@@ -503,9 +503,9 @@ ncu --set basic --kernel-name regex:sweepLevelKernel --launch-skip ... --launch-
 - 若 launch gap 明显：再评估 CUDA Graph；目前 30k 的 `cudaLaunchKernel`
   API 总时间只有约 `0.34 s`，不是首要瓶颈。
 
-200k profiling 已完成，输出位于 `results/profiles/wavefront_200k/`：
+230k profiling 已完成，输出位于 `results/profiles/wavefront_230k/`：
 
-- NSYS warm-cache：`fig5_200k_warm.nsys-rep` / `.sqlite`。当前环境仍未导出
+- NSYS warm-cache：`fig5_230k_warm.nsys-rep` / `.sqlite`。当前环境仍未导出
   CUDA kernel summary，但 CUDA API summary 显示 `cudaLaunchKernel` 共 `54933`
   次，总 API 时间约 `0.532 s`；`cudaEventSynchronize` 约 `4.787 s`。因此主要
   等待仍是 GPU kernel 执行/同步，不是 host launch API 本身。
@@ -521,16 +521,16 @@ ncu --set basic --kernel-name regex:sweepLevelKernel --launch-skip ... --launch-
 
 1. RSI tiled wavefront：对 RSI wavefront 增加 level 内 tile 维度，默认仅在
    `batchSize >= 64` 且 level width 需要多个 tile 时启用；可用
-   `RSI_CUDA_RSI_TILED_WAVEFRONT=0` 关闭。200k 下 grid 从 `128` 增至
+   `RSI_CUDA_RSI_TILED_WAVEFRONT=0` 关闭。230k 下 grid 从 `128` 增至
    `128 x 7 = 896`，achieved occupancy 从 `34.65%` 提高到 `59.47%`。
 2. GPU mesh ref-level SoA：上传时把每个 cell-face ref 的 outward normal、area、
    face center、boundary type/value/source fraction 展平成按 `refIndex` 连续的
    SoA，sweep kernel 不再经 `refFace -> face arrays` 二次随机读取。
 3. SI tiled wavefront：SI packed acyclic wavefront 也支持 level 内 tile 维度，
-   默认开启；可用 `RSI_CUDA_SI_TILED_WAVEFRONT=0` 关闭。30k/200k 均验证为
+   默认开启；可用 `RSI_CUDA_SI_TILED_WAVEFRONT=0` 关闭。30k/230k 均验证为
    不改变 CSV，且对 SI sweep 有小到中等收益。
 
-200k warm-cache 性能对比：
+230k warm-cache 性能对比：
 
 | 模式 | wall | fine CUDA total | fine SI sweep | fine RSI sweep |
 |---|---:|---:|---:|---:|
@@ -540,7 +540,7 @@ ncu --set basic --kernel-name regex:sweepLevelKernel --launch-skip ... --launch-
 | ref-level SoA + auto tiled | 8.15 s | 5.579 s | 2.358 s | 2.335 s |
 | ref-level SoA + SI tiled on | 8.10 s | 5.264 s | 2.081 s | 2.303 s |
 
-`/tmp/rsi_fig5_200k_refsoa` 与 tiled-off 对照的四个 CSV 已用 `cmp -s` 确认逐字节一致。
+`/tmp/rsi_fig5_230k_refsoa` 与 tiled-off 对照的四个 CSV 已用 `cmp -s` 确认逐字节一致。
 ref-level SoA 后，fine S32 SI NCU 指标变为：duration `225.63 us`，memory throughput
 `68.09%`，L2 throughput `68.09%`，L1 hit `4.26%`，L2 hit `72.90%`，excessive
 sectors `75%`。说明二次 face-array 间接访问确有收益，但剩余 uncoalesced 仍然较高。
@@ -560,10 +560,10 @@ sectors `75%`。说明二次 face-array 间接访问确有收益，但剩余 unc
 | 网格 | wall | fine CUDA total | fine SI sweep | fine RSI sweep | 结论 |
 |---|---:|---:|---:|---:|---|
 | 30k Morton | 39.62 s | 39.302 s | 16.722 s | 21.345 s | 慢于 SI tiled on 的 38.50 s |
-| 200k Morton warm-cache | 8.45 s | 5.637 s | 2.228 s | 2.435 s | 慢于 ref-level SoA + SI tiled on 的 8.10 s / 5.264 s |
+| 230k Morton warm-cache | 8.45 s | 5.637 s | 2.228 s | 2.435 s | 慢于 ref-level SoA + SI tiled on 的 8.10 s / 5.264 s |
 
-Morton 排序没有改变离散结果：30k 与 `/tmp/rsi_fig5_30k_si_tiled_on`、200k 与
-`/tmp/rsi_fig5_200k_no_face_arrays` 的四个 Figure 5 CSV 均 `cmp -s` 逐字节一致。
+Morton 排序没有改变离散结果：30k 与 `/tmp/rsi_fig5_30k_si_tiled_on`、230k 与
+`/tmp/rsi_fig5_230k_no_face_arrays` 的四个 Figure 5 CSV 均 `cmp -s` 逐字节一致。
 但它破坏了现有 mesh/cell-id 顺序下已经较好的访问局部性，因此源码已回滚，不作为后续方向。
 
 层内 upstream-neighbor-rank 排序也已验证但不保留：
@@ -574,7 +574,7 @@ Morton 排序没有改变离散结果：30k 与 `/tmp/rsi_fig5_30k_si_tiled_on`�
 
 该排序按每个 cell 已完成上游邻居的 sweep rank 对同一 level 内 cell 排序，30k 的
 SI fine 与 RSI CSV 仍与 `/tmp/rsi_fig5_30k_si_tiled_on` 逐字节一致，但 kernel 时间大幅
-回归，因此未继续跑 200k，源码已回滚。
+回归，因此未继续跑 230k，源码已回滚。
 
 下一步 GPU kernel 优化应优先考虑：
 
@@ -604,12 +604,12 @@ cell-id 局部性；下一步应把 `currentPsi[direction*C + neighbor]` 的随�
    - GPU `volume/sigma/ref*`、`orders`、`levelOffsets`、`currentPsi` 全部使用 new cell id。
    - 写回 `phi` / Figure 5 CSV 前按 `newToOld` 还原到原始 cell 顺序，保证文件可逐字节比较。
    - 增加环境开关，例如 `RSI_CUDA_CELL_RENUMBER=0|rcm|bfs|morton`，默认先关闭。
-3. 用 30k/200k 正式验证后再决定是否默认开启。
-   - 正确性：`make gpu_consistency_test`、`./gpu_consistency_test`，以及 30k/200k Figure 5
+3. 用 30k/230k 正式验证后再决定是否默认开启。
+   - 正确性：`make gpu_consistency_test`、`./gpu_consistency_test`，以及 30k/230k Figure 5
      四个 CSV 与当前默认输出 `cmp -s`。
-   - 性能：30k、200k warm-cache wall time；200k NCU 对比 `sweepLevelTiledKernel` 的
+   - 性能：30k、230k warm-cache wall time；230k NCU 对比 `sweepLevelTiledKernel` 的
      duration、L2 hit、excessive sectors。
-   - 接受条件：CSV byte-identical，200k fine SI/RSI sweep 至少稳定下降，且 30k 不出现明显回归。
+   - 接受条件：CSV byte-identical，230k fine SI/RSI sweep 至少稳定下降，且 30k 不出现明显回归。
 
 需要同步处理的工程细节：
 
@@ -622,7 +622,7 @@ cell-id 局部性；下一步应把 `currentPsi[direction*C + neighbor]` 的随�
 ### 优先级 4：保留但暂不优先的方向
 
 - SI direction streaming：可降低显存和 `angularPsi[M*C]` 常驻空间，但当前
-  200k 显存不是瓶颈，且会改变归约顺序，暂不优先。
+  230k 显存不是瓶颈，且会改变归约顺序，暂不优先。
 - SI reduction + convergence norm 融合：能少一次 `C` 规模读写，但现有计时中
   reduce/norm 远小于 sweep 和 host build，不优先。
 - RNG schedule 搬到 GPU：会破坏 CPU/GPU 逐 sample 可比性，且 H2D schedule 拷贝
@@ -633,4 +633,4 @@ cell-id 局部性；下一步应把 `currentPsi[direction*C + neighbor]` 的随�
 
 1. 先实现“离线重编号质量统计”工具或 debug 输出，只读 mesh，不接入求解。
 2. 选出 1-2 个候选重编号后，再实现 GPU-only renumbered view，并保持默认关闭。
-3. 跑 30k/200k byte compare、warm-cache benchmark 和 200k NCU，再决定是否保留或默认开启。
+3. 跑 30k/230k byte compare、warm-cache benchmark 和 230k NCU，再决定是否保留或默认开启。

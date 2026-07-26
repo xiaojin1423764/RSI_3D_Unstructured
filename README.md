@@ -10,6 +10,8 @@ https://github.com/lanl/tycho2
 其他可修改的参数：(都在/src/main.cpp中)
 Figure 2 收敛阶实验使用 `angularN : {8,16}`，即 level-symmetric S_N 角向划分，M=N*(N+2)，支持多个角度阶数作比较。
 
+
+
 当前角向离散使用 `Quadrature::levelSymmetricSN()` 生成的 level-symmetric S_N 方向集，SI 和 RSI 的所有角方向扫掠都共用这一套方向集
 `angularN` 必须是 >=2 的偶数。对 S_N，方向总数为 M=N*(N+2)。
 每个八分区使用 i+j+k=N/2+2 的层对称方向，符号反射到全空间。

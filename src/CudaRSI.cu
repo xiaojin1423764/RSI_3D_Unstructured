@@ -3,6 +3,7 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -949,10 +950,26 @@ struct PlanChunkTiming {
     double packSeconds = 0.0;
     double uploadSeconds = 0.0;
     double syncSeconds = 0.0;
+    std::size_t cacheReadBytes = 0;
+    std::size_t hostToDeviceBytes = 0;
     std::size_t fixedCacheChunks = 0;
     std::size_t fixedCacheHits = 0;
     std::size_t fixedCacheMisses = 0;
     double fixedCacheWallSeconds = 0.0;
+};
+
+// Counts the host-side launch geometry.  These are logical thread invocations,
+// not a measure of active lanes after level-width bounds checks.
+struct SweepLaunchStats {
+    std::uint64_t launches = 0;
+    std::uint64_t blocks = 0;
+    std::uint64_t threads = 0;
+
+    void add(std::uint64_t blockCount, std::uint64_t threadsPerBlock) {
+        ++launches;
+        blocks += blockCount;
+        threads += blockCount * threadsPerBlock;
+    }
 };
 
 struct PrefetchedHostPlanChunk {
@@ -960,6 +977,8 @@ struct PrefetchedHostPlanChunk {
     PlanChunkTiming timing;
     double uniqueSeconds = 0.0;
     double wallSeconds = 0.0;
+    bool uploaded = false;
+    int uploadedSlot = -1;
 };
 
 void accumulatePlanChunkTiming(PlanChunkTiming& total, const PlanChunkTiming& step) {
@@ -971,10 +990,25 @@ void accumulatePlanChunkTiming(PlanChunkTiming& total, const PlanChunkTiming& st
     total.packSeconds += step.packSeconds;
     total.uploadSeconds += step.uploadSeconds;
     total.syncSeconds += step.syncSeconds;
+    total.cacheReadBytes += step.cacheReadBytes;
+    total.hostToDeviceBytes += step.hostToDeviceBytes;
     total.fixedCacheChunks += step.fixedCacheChunks;
     total.fixedCacheHits += step.fixedCacheHits;
     total.fixedCacheMisses += step.fixedCacheMisses;
     total.fixedCacheWallSeconds += step.fixedCacheWallSeconds;
+}
+
+std::size_t planTransferBytes(const HostPlanChunk& chunk) {
+    return chunk.hasCycle.size() * sizeof(unsigned char) +
+           chunk.levelOffsetBase.size() * sizeof(int) +
+           chunk.levelCount.size() * sizeof(int) +
+           chunk.levelOffsets.size() * sizeof(int) +
+           chunk.directions.size() * sizeof(int) +
+           chunk.ordinateX.size() * sizeof(double) +
+           chunk.ordinateY.size() * sizeof(double) +
+           chunk.ordinateZ.size() * sizeof(double) +
+           chunk.weights.size() * sizeof(double) +
+           chunk.orders.size() * sizeof(int);
 }
 
 std::size_t hostPlanChunkBytes(const HostPlanChunk& chunk) {
@@ -1596,6 +1630,7 @@ HostPlanChunk preparePlanChunkHost(
             timing->cacheSeconds += secondsBetween(
                 cacheStart, std::chrono::steady_clock::now()
             );
+            if (loadedFromCache) timing->cacheReadBytes += sweepPlansBytes(localPlans);
         }
     }
     if (!loadedFromCache) {
@@ -1655,6 +1690,9 @@ HostPlanChunk preparePlanChunkHost(
                 localTiming.cacheSeconds += secondsBetween(
                     cacheStart, std::chrono::steady_clock::now()
                 );
+                if (fixedLoaded) {
+                    localTiming.cacheReadBytes += sweepPlansBytes(fixedPlans);
+                }
                 if (!fixedLoaded) {
                     const auto buildStart = std::chrono::steady_clock::now();
                     fixedPlans = buildSweepPlansParallel(ordinates, sweep, fixedDirections);
@@ -1831,6 +1869,7 @@ void uploadPreparedPlanChunkInto(
     PlanUploadPinnedStaging* pinnedStaging = nullptr
 ) {
     const auto uploadStart = std::chrono::steady_clock::now();
+    const std::size_t transferBytes = planTransferBytes(host);
     chunk.directionCount = host.directionCount;
     chunk.maxSweepLevelCount = host.maxSweepLevelCount;
     chunk.maxSweepLevelWidth = host.maxSweepLevelWidth;
@@ -1889,6 +1928,7 @@ void uploadPreparedPlanChunkInto(
     chunk.globalDirections = std::move(host.globalDirections);
     if (timing) {
         timing->uploadSeconds += secondsBetween(uploadStart, std::chrono::steady_clock::now());
+        timing->hostToDeviceBytes += transferBytes;
     }
 }
 
@@ -2319,7 +2359,8 @@ CudaFigure5Result runFigure5Cuda(
     const std::size_t bytesPerSample =
         static_cast<std::size_t>(3) * C * sizeof(double) +
         static_cast<std::size_t>(iterationCount) * sizeof(int);
-    constexpr int maxSamplesPerBatch = 128;
+    const int maxSamplesPerBatch =
+        envIntValue("RSI_CUDA_RSI_MAX_SAMPLES_PER_BATCH", 128, 1, 1024);
     const int batchCapacity = static_cast<int>(std::min<std::size_t>(
         std::min(sampleCount, maxSamplesPerBatch),
         std::max<std::size_t>(1, static_cast<std::size_t>(freeBytes * 0.75) /
@@ -2647,6 +2688,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     double siNormSeconds = 0.0;
     double siCopySeconds = 0.0;
     PlanChunkTiming siPlanBreakdown;
+    SweepLaunchStats siSweepLaunchStats;
 
     {
         const auto siStart = std::chrono::steady_clock::now();
@@ -2908,6 +2950,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                             );
                         }
                         if (useSIFusedWavefront) {
+                            siSweepLaunchStats.add(directionBatch, levelSweepThreads);
                             sweepLevelFusedKernel<<<directionBatch, levelSweepThreads>>>(
                                 staticProblem->mesh.view(C),
                                 chunk->ordinateX.ptr,
@@ -2932,6 +2975,11 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                             for (int level = 0; level < maxLevelCount; ++level) {
                                 if (useSITiledWavefront && siLevelTileCount > 1) {
                                     const dim3 grid(directionBatch, siLevelTileCount);
+                                    siSweepLaunchStats.add(
+                                        static_cast<std::uint64_t>(directionBatch) *
+                                            siLevelTileCount,
+                                        levelSweepThreads
+                                    );
                                     sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
                                         staticProblem->mesh.view(C),
                                         chunk->ordinateX.ptr,
@@ -2950,6 +2998,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                                         level
                                     );
                                 } else {
+                                    siSweepLaunchStats.add(directionBatch, levelSweepThreads);
                                     sweepLevelKernel<<<directionBatch, levelSweepThreads>>>(
                                         staticProblem->mesh.view(C),
                                         chunk->ordinateX.ptr,
@@ -2978,6 +3027,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                         const int localPassCount =
                             chunk->hostHasCycle[localStart] != 0 ? 20 : 1;
                         for (int localPass = 0; localPass < localPassCount; ++localPass) {
+                            siSweepLaunchStats.add(directionSweepBlocks, sweepThreads);
                             sweepSamplesKernel<<<directionSweepBlocks, sweepThreads>>>(
                                 staticProblem->mesh.view(C),
                                 chunk->ordinateX.ptr,
@@ -3105,6 +3155,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     double rsiReduceSeconds = 0.0;
     double rsiCopySeconds = 0.0;
     PlanChunkTiming rsiPlanBreakdown;
+    SweepLaunchStats rsiSweepLaunchStats;
 
     DeviceArray<double> globalRSISum, globalTailSum;
     globalRSISum.allocate(C);
@@ -3120,7 +3171,8 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     const std::size_t bytesPerSample =
         static_cast<std::size_t>(3) * C * sizeof(double) +
         static_cast<std::size_t>(iterationCount) * sizeof(int);
-    constexpr int maxSamplesPerBatch = 128;
+    const int maxSamplesPerBatch =
+        envIntValue("RSI_CUDA_RSI_MAX_SAMPLES_PER_BATCH", 128, 1, 1024);
     const int batchCapacity = static_cast<int>(std::min<std::size_t>(
         std::min(sampleCount, maxSamplesPerBatch),
         std::max<std::size_t>(1, static_cast<std::size_t>(freeBytes * 0.50) /
@@ -3149,6 +3201,9 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
         envFlagEnabled("RSI_CUDA_RSI_TILED_WAVEFRONT", true);
     const bool useRSIPlanPrefetch =
         envFlagEnabled("RSI_CUDA_RSI_PLAN_PREFETCH", true);
+    const bool useRSIPlanUploadPrefetch =
+        useRSIPlanPrefetch &&
+        envFlagEnabled("RSI_CUDA_RSI_PLAN_UPLOAD_PREFETCH", false);
     const bool useRSIGraphWavefront =
         envFlagEnabled("RSI_CUDA_RSI_GRAPH_WAVEFRONT", false);
     const bool useRSIFaceLaneWavefront =
@@ -3157,17 +3212,23 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     if (useRSIGraphWavefront) {
         rsiGraphStream = std::make_unique<CudaStream>();
     }
+    std::array<DevicePlanChunk, 2> rsiUploadPrefetchChunks;
+    std::array<PlanUploadPinnedStaging, 2> rsiUploadPrefetchStaging;
     std::future<PrefetchedHostPlanChunk> rsiPlanPrefetchFuture;
     int rsiPlanPrefetchBatchStart = -1;
-    auto launchRSIPlanPrefetch = [&](int nextBatchStart) {
+    int rsiPlanPrefetchSlot = -1;
+    auto launchRSIPlanPrefetch = [&](int nextBatchStart, int uploadSlot) {
         if (!useRSIPlanPrefetch || rsiPlanPrefetchFuture.valid()) return;
         if (nextBatchStart >= sampleCount) return;
         const int nextBatchSize = std::min(batchCapacity, sampleCount - nextBatchStart);
         rsiPlanPrefetchBatchStart = nextBatchStart;
+        rsiPlanPrefetchSlot = useRSIPlanUploadPrefetch ? uploadSlot : -1;
         rsiPlanPrefetchFuture = std::async(
             std::launch::async,
             [&mesh, &ordinates, &sweep, &schedule, &cacheKeyContext,
-             nextBatchStart, nextBatchSize, iterationCount] {
+             nextBatchStart, nextBatchSize, iterationCount,
+             useRSIPlanUploadPrefetch, uploadSlot,
+             &rsiUploadPrefetchChunks, &rsiUploadPrefetchStaging] {
                 PrefetchedHostPlanChunk prefetched;
                 const auto wallStart = std::chrono::steady_clock::now();
                 const auto uniqueStart = std::chrono::steady_clock::now();
@@ -3181,6 +3242,26 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                     mesh, ordinates, sweep, uniqueDirections,
                     &cacheKeyContext, &prefetched.timing
                 );
+                if (useRSIPlanUploadPrefetch) {
+                    CudaStream uploadStream;
+                    uploadPreparedPlanChunkInto(
+                        std::move(prefetched.host),
+                        rsiUploadPrefetchChunks[static_cast<std::size_t>(uploadSlot)],
+                        &prefetched.timing,
+                        uploadStream.stream,
+                        &rsiUploadPrefetchStaging[static_cast<std::size_t>(uploadSlot)]
+                    );
+                    const auto syncStart = std::chrono::steady_clock::now();
+                    checkCuda(
+                        cudaStreamSynchronize(uploadStream.stream),
+                        "synchronize prefetched streaming CUDA RSI plan upload"
+                    );
+                    prefetched.timing.syncSeconds += secondsBetween(
+                        syncStart, std::chrono::steady_clock::now()
+                    );
+                    prefetched.uploaded = true;
+                    prefetched.uploadedSlot = uploadSlot;
+                }
                 prefetched.wallSeconds = secondsBetween(
                     wallStart, std::chrono::steady_clock::now()
                 );
@@ -3192,17 +3273,29 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
     for (int batchStart = 0; batchStart < sampleCount; batchStart += batchCapacity) {
         const int batchSize = std::min(batchCapacity, sampleCount - batchStart);
         const std::size_t batchCellCount = static_cast<std::size_t>(batchSize) * C;
+        const int batchIndex = batchStart / batchCapacity;
+        const int currentUploadSlot = batchIndex & 1;
+        const int nextUploadSlot = currentUploadSlot ^ 1;
 
         const auto planStart = std::chrono::steady_clock::now();
         PlanChunkTiming batchPlanTiming;
         HostPlanChunk hostChunk;
+        std::unique_ptr<DevicePlanChunk> ownedChunk;
+        DevicePlanChunk* chunk = nullptr;
         if (rsiPlanPrefetchFuture.valid() &&
             rsiPlanPrefetchBatchStart == batchStart) {
             PrefetchedHostPlanChunk prefetched = rsiPlanPrefetchFuture.get();
             rsiPlanPrefetchBatchStart = -1;
+            rsiPlanPrefetchSlot = -1;
             rsiUniqueSeconds += prefetched.uniqueSeconds;
             accumulatePlanChunkTiming(batchPlanTiming, prefetched.timing);
-            hostChunk = std::move(prefetched.host);
+            if (prefetched.uploaded) {
+                chunk = &rsiUploadPrefetchChunks[
+                    static_cast<std::size_t>(prefetched.uploadedSlot)
+                ];
+            } else {
+                hostChunk = std::move(prefetched.host);
+            }
         } else {
             const auto uniqueStart = std::chrono::steady_clock::now();
             const std::vector<int> uniqueDirections = uniqueDirectionsForBatch(
@@ -3214,14 +3307,37 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                 &cacheKeyContext, &batchPlanTiming
             );
         }
-        std::unique_ptr<DevicePlanChunk> chunk = uploadPreparedPlanChunk(
-            std::move(hostChunk), &batchPlanTiming
-        );
-        const auto planSyncStart = std::chrono::steady_clock::now();
-        checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA RSI plan upload");
-        batchPlanTiming.syncSeconds += secondsBetween(
-            planSyncStart, std::chrono::steady_clock::now()
-        );
+        if (!chunk) {
+            if (useRSIPlanUploadPrefetch) {
+                CudaStream uploadStream;
+                uploadPreparedPlanChunkInto(
+                    std::move(hostChunk),
+                    rsiUploadPrefetchChunks[static_cast<std::size_t>(currentUploadSlot)],
+                    &batchPlanTiming,
+                    uploadStream.stream,
+                    &rsiUploadPrefetchStaging[static_cast<std::size_t>(currentUploadSlot)]
+                );
+                const auto planSyncStart = std::chrono::steady_clock::now();
+                checkCuda(
+                    cudaStreamSynchronize(uploadStream.stream),
+                    "synchronize streaming CUDA RSI plan upload stream"
+                );
+                batchPlanTiming.syncSeconds += secondsBetween(
+                    planSyncStart, std::chrono::steady_clock::now()
+                );
+                chunk = &rsiUploadPrefetchChunks[
+                    static_cast<std::size_t>(currentUploadSlot)
+                ];
+            } else {
+                ownedChunk = uploadPreparedPlanChunk(std::move(hostChunk), &batchPlanTiming);
+                chunk = ownedChunk.get();
+                const auto planSyncStart = std::chrono::steady_clock::now();
+                checkCuda(cudaDeviceSynchronize(), "synchronize streaming CUDA RSI plan upload");
+                batchPlanTiming.syncSeconds += secondsBetween(
+                    planSyncStart, std::chrono::steady_clock::now()
+                );
+            }
+        }
         accumulatePlanChunkTiming(rsiPlanBreakdown, batchPlanTiming);
         rsiPlanSeconds += secondsBetween(planStart, std::chrono::steady_clock::now());
 
@@ -3251,7 +3367,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
             }
         }
         for (int globalDirection : chunk->globalDirections) globalToLocal[globalDirection] = -1;
-        launchRSIPlanPrefetch(batchStart + batchCapacity);
+        launchRSIPlanPrefetch(batchStart + batchCapacity, nextUploadSlot);
 
         const auto directionCopyStart = std::chrono::steady_clock::now();
         checkCuda(cudaMemcpy(selectedDirections.ptr, batchDirections.data(),
@@ -3297,6 +3413,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                 useRSITiledWavefront && batchSize >= 64 && levelTileCount > 1;
             if (useRSIWavefront && !iterationHasCycle) {
                 if (useFusedForBatch) {
+                    rsiSweepLaunchStats.add(batchSize, levelSweepThreads);
                     sweepLevelFusedKernel<<<batchSize, levelSweepThreads>>>(
                         staticProblem->mesh.view(C),
                         chunk->ordinateX.ptr,
@@ -3326,6 +3443,10 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                     for (int level = 0; level < batchIterationMaxLevel[directionOffset]; ++level) {
                         if (useTiledForBatch) {
                             const dim3 grid(batchSize, levelTileCount);
+                            rsiSweepLaunchStats.add(
+                                static_cast<std::uint64_t>(batchSize) * levelTileCount,
+                                levelSweepThreads
+                            );
                             sweepLevelTiledKernel<<<grid, levelSweepThreads, 0,
                                                      rsiGraphStream->stream>>>(
                                 staticProblem->mesh.view(C),
@@ -3345,6 +3466,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                                 level
                             );
                         } else {
+                            rsiSweepLaunchStats.add(batchSize, levelSweepThreads);
                             sweepLevelKernel<<<batchSize, levelSweepThreads, 0,
                                                  rsiGraphStream->stream>>>(
                                 staticProblem->mesh.view(C),
@@ -3388,6 +3510,10 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                     for (int level = 0; level < batchIterationMaxLevel[directionOffset]; ++level) {
                         if (useRSIFaceLaneWavefront && useTiledForBatch) {
                             const dim3 grid(batchSize, faceLaneTileCount);
+                            rsiSweepLaunchStats.add(
+                                static_cast<std::uint64_t>(batchSize) * faceLaneTileCount,
+                                levelSweepThreads
+                            );
                             sweepLevelFaceLaneKernel<<<grid, levelSweepThreads>>>(
                                 staticProblem->mesh.view(C),
                                 chunk->ordinateX.ptr,
@@ -3407,6 +3533,10 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                             );
                         } else if (useTiledForBatch) {
                             const dim3 grid(batchSize, levelTileCount);
+                            rsiSweepLaunchStats.add(
+                                static_cast<std::uint64_t>(batchSize) * levelTileCount,
+                                levelSweepThreads
+                            );
                             sweepLevelTiledKernel<<<grid, levelSweepThreads>>>(
                                 staticProblem->mesh.view(C),
                                 chunk->ordinateX.ptr,
@@ -3425,6 +3555,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                                 level
                             );
                         } else {
+                            rsiSweepLaunchStats.add(batchSize, levelSweepThreads);
                             sweepLevelKernel<<<batchSize, levelSweepThreads>>>(
                                 staticProblem->mesh.view(C),
                                 chunk->ordinateX.ptr,
@@ -3450,6 +3581,7 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
                 const int localPassCount =
                     useRSIBatchPass && !iterationHasCycle ? 1 : 20;
                 for (int localPass = 0; localPass < localPassCount; ++localPass) {
+                    rsiSweepLaunchStats.add(sampleSweepBlocks, sweepThreads);
                     sweepSamplesKernel<<<sampleSweepBlocks, sweepThreads>>>(
                         staticProblem->mesh.view(C),
                         chunk->ordinateX.ptr,
@@ -3572,10 +3704,29 @@ CudaFigure5Result runFigure5CudaStreamingPlans(
               << ", rsi_plan_fixed_cache_misses=" << rsiPlanBreakdown.fixedCacheMisses
               << ", rsi_plan_fixed_cache_wall=" << rsiPlanBreakdown.fixedCacheWallSeconds
               << "\n";
+    std::cout << "CUDA streaming parallelism: si_sweep_launches="
+              << siSweepLaunchStats.launches
+              << ", si_sweep_blocks=" << siSweepLaunchStats.blocks
+              << ", si_sweep_logical_threads=" << siSweepLaunchStats.threads
+              << ", si_sweep_threads_per_block=" << levelSweepThreads
+              << ", rsi_sweep_launches=" << rsiSweepLaunchStats.launches
+              << ", rsi_sweep_blocks=" << rsiSweepLaunchStats.blocks
+              << ", rsi_sweep_logical_threads=" << rsiSweepLaunchStats.threads
+              << ", rsi_sweep_threads_per_block=" << levelSweepThreads << "\n";
+    std::cout << "CUDA streaming plan_transfer: si_cache_read_bytes="
+              << siPlanBreakdown.cacheReadBytes
+              << ", si_h2d_bytes=" << siPlanBreakdown.hostToDeviceBytes
+              << ", rsi_cache_read_bytes=" << rsiPlanBreakdown.cacheReadBytes
+              << ", rsi_h2d_bytes=" << rsiPlanBreakdown.hostToDeviceBytes
+              << ", rsi_direction_h2d_bytes="
+              << static_cast<std::size_t>(sampleCount) * iterationCount * sizeof(int)
+              << "\n";
     std::cout << "CUDA streaming Figure 5 complete: cells=" << C
               << ", directions=" << M
               << ", SI_iterations=" << result.convergedN
               << ", samples=" << sampleCount
+              << ", rsi_batch_capacity=" << batchCapacity
+              << ", rsi_batch_cap_requested=" << maxSamplesPerBatch
               << ", seconds=" << seconds << "\n";
     return result;
 }
@@ -3883,7 +4034,8 @@ std::vector<double> runRSIFieldAtNCuda(
         static_cast<std::size_t>(3) * C * sizeof(double) +
         static_cast<std::size_t>(iterationCount) * sizeof(int);
     const std::size_t usableBytes = static_cast<std::size_t>(freeBytes * 0.75);
-    constexpr int maxSamplesPerBatch = 128;
+    const int maxSamplesPerBatch =
+        envIntValue("RSI_CUDA_RSI_MAX_SAMPLES_PER_BATCH", 128, 1, 1024);
     const int batchCapacity = static_cast<int>(std::min<std::size_t>(
         std::min(sampleCount, maxSamplesPerBatch),
         std::max<std::size_t>(1, usableBytes / std::max<std::size_t>(bytesPerSample, 1))
