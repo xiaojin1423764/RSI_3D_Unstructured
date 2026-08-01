@@ -1,0 +1,115 @@
+入射区域形状: circle (Cir)
+GPU模式: RSI/RSI-tail使用CUDA样本并行；SI使用CUDA角度并行；Figure 2保持CPU路径
+开始输出 Figure 5 空间场数据...
+Sweep plans loaded: directions=24, seconds=0.00604002, cache=results/cache/rsi_sweep_plan_2b4d7c89ddb478b3.bin
+Sweep plan levels: acyclic=24, cyclic=0, avg_levels=249.583, max_levels=264, avg_width=146.124, max_width=265, max_width_direction=10
+CUDA SI-only iteration=1, relative=0
+CUDA SI-only iteration=2, relative=0.0817593
+CUDA SI-only iteration=3, relative=0.0105738
+CUDA SI-only iteration=4, relative=0.00171508
+CUDA SI-only iteration=5, relative=0.000293369
+CUDA SI-only iteration=6, relative=5.10506e-05
+CUDA SI-only iteration=7, relative=8.943e-06
+CUDA SI-only iteration=8, relative=1.57101e-06
+CUDA SI-only iteration=9, relative=2.76314e-07
+CUDA SI-only iteration=10, relative=4.86246e-08
+CUDA SI-only iteration=11, relative=8.55876e-09
+CUDA SI-only iteration=12, relative=1.50664e-09
+CUDA SI-only iteration=13, relative=2.65234e-10
+CUDA SI-only iteration=14, relative=4.66936e-11
+CUDA SI-only timing: upload=0.166881, total=0.229194, si_clear=0.00063152, si_sweep=0.0522623, si_reduce=0.000624576, si_norm=0.00294797, si_copy=0.000149653
+CUDA SI-only complete: cells=36470, directions=24, SI_iterations=14, seconds=0.229194
+GPU Figure 5 coarse SI converged at N=14
+CUDA streaming SI iteration=1, relative=0
+CUDA streaming SI iteration=2, relative=0.086582
+CUDA streaming SI iteration=3, relative=0.0115399
+CUDA streaming SI iteration=4, relative=0.00191081
+CUDA streaming SI iteration=5, relative=0.000331976
+CUDA streaming SI iteration=6, relative=5.85157e-05
+CUDA streaming SI iteration=7, relative=1.03692e-05
+CUDA streaming SI iteration=8, relative=1.8415e-06
+CUDA streaming SI iteration=9, relative=3.27346e-07
+CUDA streaming SI iteration=10, relative=5.8214e-08
+CUDA streaming SI iteration=11, relative=1.03546e-08
+CUDA streaming SI iteration=12, relative=1.84194e-09
+CUDA streaming SI iteration=13, relative=3.27669e-10
+CUDA streaming SI iteration=14, relative=5.82914e-11
+CUDA streaming SI device plan cache: chunks=130/130, bytes=2444975360, hits=1690, misses=130
+CUDA streaming SI host plan cache: chunks=0/130, bytes=0, hits=0, misses=130
+CUDA streaming RSI batch complete: samples=128/8192, unique_directions=2792
+CUDA streaming RSI batch complete: samples=256/8192, unique_directions=2790
+CUDA streaming RSI batch complete: samples=384/8192, unique_directions=2799
+CUDA streaming RSI batch complete: samples=512/8192, unique_directions=2795
+CUDA streaming RSI batch complete: samples=640/8192, unique_directions=2790
+CUDA streaming RSI batch complete: samples=768/8192, unique_directions=2820
+CUDA streaming RSI batch complete: samples=896/8192, unique_directions=2775
+CUDA streaming RSI batch complete: samples=1024/8192, unique_directions=2795
+CUDA streaming RSI batch complete: samples=1152/8192, unique_directions=2803
+CUDA streaming RSI batch complete: samples=1280/8192, unique_directions=2808
+CUDA streaming RSI batch complete: samples=1408/8192, unique_directions=2809
+CUDA streaming RSI batch complete: samples=1536/8192, unique_directions=2795
+CUDA streaming RSI batch complete: samples=1664/8192, unique_directions=2794
+CUDA streaming RSI batch complete: samples=1792/8192, unique_directions=2789
+CUDA streaming RSI batch complete: samples=1920/8192, unique_directions=2805
+CUDA streaming RSI batch complete: samples=2048/8192, unique_directions=2780
+CUDA streaming RSI batch complete: samples=2176/8192, unique_directions=2797
+CUDA streaming RSI batch complete: samples=2304/8192, unique_directions=2791
+CUDA streaming RSI batch complete: samples=2432/8192, unique_directions=2809
+CUDA streaming RSI batch complete: samples=2560/8192, unique_directions=2800
+CUDA streaming RSI batch complete: samples=2688/8192, unique_directions=2799
+CUDA streaming RSI batch complete: samples=2816/8192, unique_directions=2786
+CUDA streaming RSI batch complete: samples=2944/8192, unique_directions=2800
+CUDA streaming RSI batch complete: samples=3072/8192, unique_directions=2806
+CUDA streaming RSI batch complete: samples=3200/8192, unique_directions=2819
+CUDA streaming RSI batch complete: samples=3328/8192, unique_directions=2791
+CUDA streaming RSI batch complete: samples=3456/8192, unique_directions=2821
+CUDA streaming RSI batch complete: samples=3584/8192, unique_directions=2791
+CUDA streaming RSI batch complete: samples=3712/8192, unique_directions=2815
+CUDA streaming RSI batch complete: samples=3840/8192, unique_directions=2769
+CUDA streaming RSI batch complete: samples=3968/8192, unique_directions=2790
+CUDA streaming RSI batch complete: samples=4096/8192, unique_directions=2805
+CUDA streaming RSI batch complete: samples=4224/8192, unique_directions=2804
+CUDA streaming RSI batch complete: samples=4352/8192, unique_directions=2822
+CUDA streaming RSI batch complete: samples=4480/8192, unique_directions=2809
+CUDA streaming RSI batch complete: samples=4608/8192, unique_directions=2800
+CUDA streaming RSI batch complete: samples=4736/8192, unique_directions=2801
+CUDA streaming RSI batch complete: samples=4864/8192, unique_directions=2837
+CUDA streaming RSI batch complete: samples=4992/8192, unique_directions=2796
+CUDA streaming RSI batch complete: samples=5120/8192, unique_directions=2813
+CUDA streaming RSI batch complete: samples=5248/8192, unique_directions=2807
+CUDA streaming RSI batch complete: samples=5376/8192, unique_directions=2811
+CUDA streaming RSI batch complete: samples=5504/8192, unique_directions=2779
+CUDA streaming RSI batch complete: samples=5632/8192, unique_directions=2846
+CUDA streaming RSI batch complete: samples=5760/8192, unique_directions=2831
+CUDA streaming RSI batch complete: samples=5888/8192, unique_directions=2804
+CUDA streaming RSI batch complete: samples=6016/8192, unique_directions=2802
+CUDA streaming RSI batch complete: samples=6144/8192, unique_directions=2804
+CUDA streaming RSI batch complete: samples=6272/8192, unique_directions=2786
+CUDA streaming RSI batch complete: samples=6400/8192, unique_directions=2789
+CUDA streaming RSI batch complete: samples=6528/8192, unique_directions=2796
+CUDA streaming RSI batch complete: samples=6656/8192, unique_directions=2813
+CUDA streaming RSI batch complete: samples=6784/8192, unique_directions=2784
+CUDA streaming RSI batch complete: samples=6912/8192, unique_directions=2793
+CUDA streaming RSI batch complete: samples=7040/8192, unique_directions=2787
+CUDA streaming RSI batch complete: samples=7168/8192, unique_directions=2806
+CUDA streaming RSI batch complete: samples=7296/8192, unique_directions=2810
+CUDA streaming RSI batch complete: samples=7424/8192, unique_directions=2828
+CUDA streaming RSI batch complete: samples=7552/8192, unique_directions=2781
+CUDA streaming RSI batch complete: samples=7680/8192, unique_directions=2822
+CUDA streaming RSI batch complete: samples=7808/8192, unique_directions=2799
+CUDA streaming RSI batch complete: samples=7936/8192, unique_directions=2814
+CUDA streaming RSI batch complete: samples=8064/8192, unique_directions=2831
+CUDA streaming RSI batch complete: samples=8192/8192, unique_directions=2805
+CUDA streaming timing: upload=0.0136229, total=199.518
+CUDA streaming timing: si_total=68.0163, si_plan=4.72783, si_clear=0.000761152, si_sweep=62.0051, si_reduce=0.000465664, si_norm=0.00322086, si_copy=0.000181171
+CUDA streaming timing: si_sweep_breakdown_angular_clear=0, si_sweep_breakdown_kernel=0, si_sweep_breakdown_accumulate=0, si_sweep_breakdown_sync=0
+CUDA streaming timing: si_plan_breakdown_key=0.0083418, si_plan_breakdown_cache=3.58644, si_plan_breakdown_build=0, si_plan_breakdown_save=0, si_plan_breakdown_assemble=0, si_plan_breakdown_pack=0.156361, si_plan_breakdown_upload=0.848667, si_plan_breakdown_sync=0.0619064, si_plan_fixed_cache_chunks=0, si_plan_fixed_cache_hits=0, si_plan_fixed_cache_misses=0, si_plan_fixed_cache_wall=0
+CUDA streaming timing: rsi_total=131.441, rsi_plan=22.8903, rsi_schedule=0.476836, rsi_unique=0.007727, rsi_direction_copy=0.00295947, rsi_sweep=105.48, rsi_tail_accum=0.098326, rsi_reduce=0.00790499, rsi_copy=0.000414482
+CUDA streaming timing: rsi_plan_breakdown_key=1.18489, rsi_plan_breakdown_cache=136.915, rsi_plan_breakdown_build=0, rsi_plan_breakdown_save=0, rsi_plan_breakdown_assemble=4.23356, rsi_plan_breakdown_pack=1.8688, rsi_plan_breakdown_upload=8.02787, rsi_plan_breakdown_sync=0.0205351, rsi_plan_fixed_cache_chunks=179338, rsi_plan_fixed_cache_hits=179338, rsi_plan_fixed_cache_misses=0, rsi_plan_fixed_cache_wall=8.99021
+CUDA streaming Figure 5 complete: cells=36470, directions=16640, SI_iterations=14, samples=8192, seconds=199.518
+GPU Figure 5 SI converged at N=14
+Figure 5 数据已输出:
+  Data/csv_data/30k_streaming_opt/Cir/figure5_SI_coarse.csv
+  Data/csv_data/30k_streaming_opt/Cir/figure5_SI_fine.csv
+  Data/csv_data/30k_streaming_opt/Cir/figure5_RSI.csv
+  Data/csv_data/30k_streaming_opt/Cir/figure5_RSI_tail.csv

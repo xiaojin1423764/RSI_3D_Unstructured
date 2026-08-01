@@ -1,0 +1,124 @@
+入射区域形状: circle (Cir)
+GPU模式: RSI/RSI-tail使用CUDA样本并行；SI使用CUDA角度并行；Figure 2保持CPU路径
+开始输出 Figure 5 空间场数据...
+Sweep plans loaded: directions=24, seconds=0.00313518, cache=results/cache/rsi_sweep_plan_2b4d7c89ddb478b3.bin
+Sweep plan levels: acyclic=24, cyclic=0, avg_levels=249.583, max_levels=264, avg_width=146.124, max_width=265, max_width_direction=10
+CUDA SI-only iteration=1, relative=0
+CUDA SI-only iteration=2, relative=0.0817593
+CUDA SI-only iteration=3, relative=0.0105738
+CUDA SI-only iteration=4, relative=0.00171508
+CUDA SI-only iteration=5, relative=0.000293369
+CUDA SI-only iteration=6, relative=5.10506e-05
+CUDA SI-only iteration=7, relative=8.943e-06
+CUDA SI-only iteration=8, relative=1.57101e-06
+CUDA SI-only iteration=9, relative=2.76314e-07
+CUDA SI-only iteration=10, relative=4.86246e-08
+CUDA SI-only iteration=11, relative=8.55876e-09
+CUDA SI-only iteration=12, relative=1.50664e-09
+CUDA SI-only iteration=13, relative=2.65234e-10
+CUDA SI-only iteration=14, relative=4.66936e-11
+CUDA SI-only timing: upload=0.201219, total=0.25617, si_clear=0.000683872, si_sweep=0.0469256, si_reduce=0.000368576, si_norm=0.00317101, si_copy=0.000145112
+CUDA SI-only complete: cells=36470, directions=24, SI_iterations=14, seconds=0.25617
+GPU Figure 5 coarse SI converged at N=14
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+CUDA streaming SI iteration=1, relative=0
+CUDA streaming SI iteration=2, relative=0.086582
+CUDA streaming SI iteration=3, relative=0.0115399
+CUDA streaming SI iteration=4, relative=0.00191081
+CUDA streaming SI iteration=5, relative=0.000331976
+CUDA streaming SI iteration=6, relative=5.85157e-05
+CUDA streaming SI iteration=7, relative=1.03692e-05
+CUDA streaming SI iteration=8, relative=1.8415e-06
+CUDA streaming SI iteration=9, relative=3.27346e-07
+CUDA streaming SI iteration=10, relative=5.8214e-08
+CUDA streaming SI iteration=11, relative=1.03546e-08
+CUDA streaming SI iteration=12, relative=1.84194e-09
+CUDA streaming SI iteration=13, relative=3.27669e-10
+CUDA streaming SI iteration=14, relative=5.82914e-11
+CUDA streaming SI device plan cache: chunks=130/130, bytes=2444975360, hits=1690, misses=130
+CUDA streaming RSI batch complete: samples=128/8192, unique_directions=2792
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+CUDA streaming RSI batch complete: samples=256/8192, unique_directions=2790
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+CUDA streaming RSI batch complete: samples=384/8192, unique_directions=2799
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+CUDA streaming RSI batch complete: samples=512/8192, unique_directions=2795
+CUDA streaming RSI batch complete: samples=640/8192, unique_directions=2790
+CUDA streaming RSI batch complete: samples=768/8192, unique_directions=2820
+CUDA streaming RSI batch complete: samples=896/8192, unique_directions=2775
+CUDA streaming RSI batch complete: samples=1024/8192, unique_directions=2795
+CUDA streaming RSI batch complete: samples=1152/8192, unique_directions=2803
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+CUDA streaming RSI batch complete: samples=1280/8192, unique_directions=2808
+CUDA streaming RSI batch complete: samples=1408/8192, unique_directions=2809
+CUDA streaming RSI batch complete: samples=1536/8192, unique_directions=2795
+CUDA streaming RSI batch complete: samples=1664/8192, unique_directions=2794
+CUDA streaming RSI batch complete: samples=1792/8192, unique_directions=2789
+CUDA streaming RSI batch complete: samples=1920/8192, unique_directions=2805
+CUDA streaming RSI batch complete: samples=2048/8192, unique_directions=2780
+CUDA streaming RSI batch complete: samples=2176/8192, unique_directions=2797
+CUDA streaming RSI batch complete: samples=2304/8192, unique_directions=2791
+CUDA streaming RSI batch complete: samples=2432/8192, unique_directions=2809
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+CUDA streaming RSI batch complete: samples=2560/8192, unique_directions=2800
+CUDA streaming RSI batch complete: samples=2688/8192, unique_directions=2799
+CUDA streaming RSI batch complete: samples=2816/8192, unique_directions=2786
+CUDA streaming RSI batch complete: samples=2944/8192, unique_directions=2800
+CUDA streaming RSI batch complete: samples=3072/8192, unique_directions=2806
+CUDA streaming RSI batch complete: samples=3200/8192, unique_directions=2819
+CUDA streaming RSI batch complete: samples=3328/8192, unique_directions=2791
+CUDA streaming RSI batch complete: samples=3456/8192, unique_directions=2821
+CUDA streaming RSI batch complete: samples=3584/8192, unique_directions=2791
+CUDA streaming RSI batch complete: samples=3712/8192, unique_directions=2815
+CUDA streaming RSI batch complete: samples=3840/8192, unique_directions=2769
+CUDA streaming RSI batch complete: samples=3968/8192, unique_directions=2790
+CUDA streaming RSI batch complete: samples=4096/8192, unique_directions=2805
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+CUDA streaming RSI batch complete: samples=4224/8192, unique_directions=2804
+CUDA streaming RSI batch complete: samples=4352/8192, unique_directions=2822
+CUDA streaming RSI batch complete: samples=4480/8192, unique_directions=2809
+CUDA streaming RSI batch complete: samples=4608/8192, unique_directions=2800
+CUDA streaming RSI batch complete: samples=4736/8192, unique_directions=2801
+CUDA streaming RSI batch complete: samples=4864/8192, unique_directions=2837
+CUDA streaming RSI batch complete: samples=4992/8192, unique_directions=2796
+CUDA streaming RSI batch complete: samples=5120/8192, unique_directions=2813
+CUDA streaming RSI batch complete: samples=5248/8192, unique_directions=2807
+CUDA streaming RSI batch complete: samples=5376/8192, unique_directions=2811
+CUDA streaming RSI batch complete: samples=5504/8192, unique_directions=2779
+CUDA streaming RSI batch complete: samples=5632/8192, unique_directions=2846
+CUDA streaming RSI batch complete: samples=5760/8192, unique_directions=2831
+CUDA streaming RSI batch complete: samples=5888/8192, unique_directions=2804
+CUDA streaming RSI batch complete: samples=6016/8192, unique_directions=2802
+CUDA streaming RSI batch complete: samples=6144/8192, unique_directions=2804
+CUDA streaming RSI batch complete: samples=6272/8192, unique_directions=2786
+CUDA streaming RSI batch complete: samples=6400/8192, unique_directions=2789
+CUDA streaming RSI batch complete: samples=6528/8192, unique_directions=2796
+CUDA streaming RSI batch complete: samples=6656/8192, unique_directions=2813
+CUDA streaming RSI batch complete: samples=6784/8192, unique_directions=2784
+CUDA streaming RSI batch complete: samples=6912/8192, unique_directions=2793
+CUDA streaming RSI batch complete: samples=7040/8192, unique_directions=2787
+CUDA streaming RSI batch complete: samples=7168/8192, unique_directions=2806
+CUDA streaming RSI batch complete: samples=7296/8192, unique_directions=2810
+CUDA streaming RSI batch complete: samples=7424/8192, unique_directions=2828
+CUDA streaming RSI batch complete: samples=7552/8192, unique_directions=2781
+CUDA streaming RSI batch complete: samples=7680/8192, unique_directions=2822
+CUDA streaming RSI batch complete: samples=7808/8192, unique_directions=2799
+CUDA streaming RSI batch complete: samples=7936/8192, unique_directions=2814
+CUDA streaming RSI batch complete: samples=8064/8192, unique_directions=2831
+CUDA streaming RSI batch complete: samples=8192/8192, unique_directions=2805
+CUDA streaming timing: upload=0.0129481, total=1249.43
+CUDA streaming timing: si_total=68.8223, si_plan=12.997, si_clear=0.000749856, si_sweep=55.7831, si_reduce=0.00039456, si_norm=0.00340218, si_copy=0.000217612
+CUDA streaming timing: rsi_total=1180.55, rsi_plan=1095.23, rsi_schedule=0.472493, rsi_unique=0.00675358, rsi_direction_copy=0.00354515, rsi_sweep=84.0912, rsi_tail_accum=0.0934781, rsi_reduce=0.00714406, rsi_copy=0.00035409
+CUDA streaming timing: rsi_plan_breakdown_key=952.799, rsi_plan_breakdown_cache=15.3248, rsi_plan_breakdown_build=90.7545, rsi_plan_breakdown_save=7.13318, rsi_plan_breakdown_assemble=4.12157, rsi_plan_breakdown_pack=6.36238, rsi_plan_breakdown_upload=7.98419, rsi_plan_breakdown_sync=0.00133689
+CUDA streaming Figure 5 complete: cells=36470, directions=16640, SI_iterations=14, samples=8192, seconds=1249.43
+GPU Figure 5 SI converged at N=14
+Figure 5 数据已输出:
+  Data/csv_data/30k_streaming/Cir/figure5_SI_coarse.csv
+  Data/csv_data/30k_streaming/Cir/figure5_SI_fine.csv
+  Data/csv_data/30k_streaming/Cir/figure5_RSI.csv
+  Data/csv_data/30k_streaming/Cir/figure5_RSI_tail.csv

@@ -1,0 +1,119 @@
+入射区域形状: circle (Cir)
+GPU模式: RSI/RSI-tail使用CUDA样本并行；SI使用CUDA角度并行；Figure 2保持CPU路径
+开始输出 Figure 5 空间场数据...
+Sweep plans loaded: directions=24, seconds=0.00179652, cache=results/cache/rsi_sweep_plan_2b4d7c89ddb478b3.bin
+Sweep plan levels: acyclic=24, cyclic=0, avg_levels=249.583, max_levels=264, avg_width=146.124, max_width=265, max_width_direction=10
+CUDA SI-only iteration=1, relative=0
+CUDA SI-only iteration=2, relative=0.0817593
+CUDA SI-only iteration=3, relative=0.0105738
+CUDA SI-only iteration=4, relative=0.00171508
+CUDA SI-only iteration=5, relative=0.000293369
+CUDA SI-only iteration=6, relative=5.10506e-05
+CUDA SI-only iteration=7, relative=8.943e-06
+CUDA SI-only iteration=8, relative=1.57101e-06
+CUDA SI-only iteration=9, relative=2.76314e-07
+CUDA SI-only iteration=10, relative=4.86246e-08
+CUDA SI-only iteration=11, relative=8.55876e-09
+CUDA SI-only iteration=12, relative=1.50664e-09
+CUDA SI-only iteration=13, relative=2.65234e-10
+CUDA SI-only iteration=14, relative=4.66936e-11
+CUDA SI-only timing: upload=0.146528, total=0.269507, si_clear=0.000918464, si_sweep=0.11185, si_reduce=0.000911424, si_norm=0.00414707, si_copy=0.000177679
+CUDA SI-only complete: cells=36470, directions=24, SI_iterations=14, seconds=0.269507
+GPU Figure 5 coarse SI converged at N=14
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+警告: 当前方向 cell 依赖图存在环，已改用投影排序 + 上风 Gauss-Seidel 迭代。
+Sweep plans built: directions=16640, threads=16, seconds=6.85386
+Sweep plan levels: acyclic=16634, cyclic=6, avg_levels=229.368, max_levels=292, avg_width=159.002, max_width=575, max_width_direction=543
+Sweep plans cached: seconds=2.35594, cache=results/cache/rsi_sweep_plan_4ddb8c57b1006477.bin
+CUDA SI iteration=1, relative=0
+CUDA SI iteration=2, relative=0.086582
+CUDA SI iteration=3, relative=0.0115399
+CUDA SI iteration=4, relative=0.00191081
+CUDA SI iteration=5, relative=0.000331976
+CUDA SI iteration=6, relative=5.85157e-05
+CUDA SI iteration=7, relative=1.03692e-05
+CUDA SI iteration=8, relative=1.8415e-06
+CUDA SI iteration=9, relative=3.27346e-07
+CUDA SI iteration=10, relative=5.8214e-08
+CUDA SI iteration=11, relative=1.03546e-08
+CUDA SI iteration=12, relative=1.84194e-09
+CUDA SI iteration=13, relative=3.27669e-10
+CUDA SI iteration=14, relative=5.82914e-11
+CUDA RSI combined batch complete: samples=128/8192
+CUDA RSI combined batch complete: samples=256/8192
+CUDA RSI combined batch complete: samples=384/8192
+CUDA RSI combined batch complete: samples=512/8192
+CUDA RSI combined batch complete: samples=640/8192
+CUDA RSI combined batch complete: samples=768/8192
+CUDA RSI combined batch complete: samples=896/8192
+CUDA RSI combined batch complete: samples=1024/8192
+CUDA RSI combined batch complete: samples=1152/8192
+CUDA RSI combined batch complete: samples=1280/8192
+CUDA RSI combined batch complete: samples=1408/8192
+CUDA RSI combined batch complete: samples=1536/8192
+CUDA RSI combined batch complete: samples=1664/8192
+CUDA RSI combined batch complete: samples=1792/8192
+CUDA RSI combined batch complete: samples=1920/8192
+CUDA RSI combined batch complete: samples=2048/8192
+CUDA RSI combined batch complete: samples=2176/8192
+CUDA RSI combined batch complete: samples=2304/8192
+CUDA RSI combined batch complete: samples=2432/8192
+CUDA RSI combined batch complete: samples=2560/8192
+CUDA RSI combined batch complete: samples=2688/8192
+CUDA RSI combined batch complete: samples=2816/8192
+CUDA RSI combined batch complete: samples=2944/8192
+CUDA RSI combined batch complete: samples=3072/8192
+CUDA RSI combined batch complete: samples=3200/8192
+CUDA RSI combined batch complete: samples=3328/8192
+CUDA RSI combined batch complete: samples=3456/8192
+CUDA RSI combined batch complete: samples=3584/8192
+CUDA RSI combined batch complete: samples=3712/8192
+CUDA RSI combined batch complete: samples=3840/8192
+CUDA RSI combined batch complete: samples=3968/8192
+CUDA RSI combined batch complete: samples=4096/8192
+CUDA RSI combined batch complete: samples=4224/8192
+CUDA RSI combined batch complete: samples=4352/8192
+CUDA RSI combined batch complete: samples=4480/8192
+CUDA RSI combined batch complete: samples=4608/8192
+CUDA RSI combined batch complete: samples=4736/8192
+CUDA RSI combined batch complete: samples=4864/8192
+CUDA RSI combined batch complete: samples=4992/8192
+CUDA RSI combined batch complete: samples=5120/8192
+CUDA RSI combined batch complete: samples=5248/8192
+CUDA RSI combined batch complete: samples=5376/8192
+CUDA RSI combined batch complete: samples=5504/8192
+CUDA RSI combined batch complete: samples=5632/8192
+CUDA RSI combined batch complete: samples=5760/8192
+CUDA RSI combined batch complete: samples=5888/8192
+CUDA RSI combined batch complete: samples=6016/8192
+CUDA RSI combined batch complete: samples=6144/8192
+CUDA RSI combined batch complete: samples=6272/8192
+CUDA RSI combined batch complete: samples=6400/8192
+CUDA RSI combined batch complete: samples=6528/8192
+CUDA RSI combined batch complete: samples=6656/8192
+CUDA RSI combined batch complete: samples=6784/8192
+CUDA RSI combined batch complete: samples=6912/8192
+CUDA RSI combined batch complete: samples=7040/8192
+CUDA RSI combined batch complete: samples=7168/8192
+CUDA RSI combined batch complete: samples=7296/8192
+CUDA RSI combined batch complete: samples=7424/8192
+CUDA RSI combined batch complete: samples=7552/8192
+CUDA RSI combined batch complete: samples=7680/8192
+CUDA RSI combined batch complete: samples=7808/8192
+CUDA RSI combined batch complete: samples=7936/8192
+CUDA RSI combined batch complete: samples=8064/8192
+CUDA RSI combined batch complete: samples=8192/8192
+CUDA timing: upload=1.85652, total=148.975
+CUDA timing: si_total=56.6225, si_clear=0.000561216, si_sweep=56.5133, si_reduce=0.000538656, si_norm=0.00337891, si_copy=0.000219185, si_checkpoint=0
+CUDA timing: rsi_total=90.4952, rsi_schedule=0.452203, rsi_direction_copy=0.00704407, rsi_sweep=89.69, rsi_tail_accum=0.0916074, rsi_reduce=0.00738598, rsi_copy=0.000383503, rsi_checkpoint=0
+CUDA Figure 5 complete: cells=36470, directions=16640, SI_iterations=14, samples=8192, seconds=148.975
+GPU Figure 5 SI converged at N=14
+Figure 5 数据已输出:
+  Data/csv_data/30k/Cir/figure5_SI_coarse.csv
+  Data/csv_data/30k/Cir/figure5_SI_fine.csv
+  Data/csv_data/30k/Cir/figure5_RSI.csv
+  Data/csv_data/30k/Cir/figure5_RSI_tail.csv
