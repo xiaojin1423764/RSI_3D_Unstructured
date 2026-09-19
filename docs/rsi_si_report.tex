@@ -1,0 +1,405 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=21mm]{geometry}
+\usepackage{fontspec}
+\usepackage{xeCJK}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{placeins}
+\usepackage{hyperref}
+\setmainfont{TeX Gyre Termes}
+\setsansfont{TeX Gyre Heros}
+\setCJKmainfont{Droid Sans Fallback}
+\setCJKsansfont{Droid Sans Fallback}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=black}
+\definecolor{blue}{RGB}{22,91,125}
+\definecolor{lightblue}{RGB}{235,243,247}
+\definecolor{lightgray}{RGB}{245,245,245}
+\renewcommand{\figurename}{图}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+\setlist[itemize]{leftmargin=1.5em,itemsep=2pt,topsep=2pt}
+\setlist[enumerate]{leftmargin=1.7em,itemsep=2pt,topsep=2pt}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\sffamily\footnotesize RSI/SI 方法、并行与数值结果报告}
+\fancyhead[R]{\sffamily\footnotesize \thepage}
+\renewcommand{\headrulewidth}{0.35pt}
+\newcommand{\reporttitle}[1]{{\sffamily\bfseries\fontsize{25}{31}\selectfont\color{blue}#1\par}}
+\newcommand{\sectiontitle}[1]{\section{\sffamily\color{blue}#1}}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+\begin{document}
+
+\begin{titlepage}
+\vspace*{28mm}
+\reporttitle{RSI/SI 方法、并行与数值结果报告}
+\vspace{5mm}
+{\sffamily\Large 基于非结构四面体网格 CUDA 实现的归纳整理}\par
+\vspace{16mm}
+\colorbox{lightblue}{\parbox{0.92\linewidth}{\large
+\textbf{阅读结论}\quad RSI 在角度变量中随机采样、在空间变量中保留确定性输运扫掠。理论上它对 SI 无偏，样本均值误差按 $S^{-1/2}$ 收敛；工程上以样本链并行为主，适合高角度离散。当前 230k 单元、$S_{128}$（16,640 方向）、8,192 样本的算例已可在 16 GB 级 GPU 上通过流式 plan 完整运行。}}\par
+\vfill
+\begin{tabularx}{\linewidth}{@{}lY@{}}
+\toprule
+整理范围 & \texttt{2502.15454.pdf}（RSI 原理）、两份 \texttt{si\_rsi\_parallel\_optimization.pdf}（以 21 页 ``当前实现'' 版为准）、\texttt{results/30k\_230k\_results.pdf}（场结果）。\\
+术语 & SI：Source Iteration；RSI：Random Source Iteration；RSI-tail：同一随机链在收敛步及其后 10 步的平均。\\
+\bottomrule
+\end{tabularx}
+\end{titlepage}
+
+\sectiontitle{1. 问题与方法概览}
+稳态辐射输运方程（RTE）可写为
+\[
+ \Omega\cdot\nabla\psi(\mathbf r,\Omega)+\Sigma_T\psi(\mathbf r,\Omega)
+ =\Sigma_S\phi(\mathbf r)+Q(\mathbf r),\qquad
+ \phi(\mathbf r)=\int_{S^2}K(\Omega,\Omega')\psi(\mathbf r,\Omega')\,d\Omega'.
+\]
+其中 $\psi$ 是角通量，$\phi$ 是标量通量，$\Sigma_T/\Sigma_S$ 分别为总/散射截面，$Q$ 为体源。离散纵标法（DOM）将球面替换为 $M$ 个方向及权重。方向数不足时，离散射线会在空间中留下非物理条纹，即射线效应。
+
+\textbf{SI} 在第 $k$ 轮冻结上一轮散射源，分别扫掠所有方向，再按权重求和：
+\[
+ \Omega_m\!\cdot\!\nabla\psi_m^{(k)}+\Sigma_T\psi_m^{(k)}
+ =\Sigma_S\phi^{(k-1)}+Q,\qquad
+ \phi^{(k)}=\sum_{m=1}^{M}w_m\psi_m^{(k)}.
+\]
+其优点是确定性、易验证；瓶颈是每轮必须计算全部 $M$ 个方向，且高角度 DOM 的角度归约代价高。
+
+\textbf{RSI} 每一步仅从方向集合中随机抽取 $G\ll M$ 个方向（当前 GPU 路径为 $G=1$），并以分组权重修正随机散射源。每条随机方向序列构成一条样本链；$S$ 条独立链的平均给出估计。RSI-tail 复用这些链，将第 $N$ 至 $N+10$ 步一并平均：
+\[
+ \phi_{\rm RSI}=\frac1S\sum_{s=1}^S\psi_s^{(N)},\qquad
+ \phi_{\rm tail}=\frac1{11S}\sum_{s=1}^{S}\sum_{j=0}^{10}\psi_s^{(N+j)}.
+\]
+
+\begin{tabularx}{\linewidth}{@{}lYY@{}}
+\toprule
+方法 & 计算特征 & 适用判断\\
+\midrule
+SI & 每轮扫全部方向；方向结果做加权归约 & 低角度或需要确定性基准时直接有效。\\
+RSI & 每样本、每步仅扫少量随机方向；样本平均 & 高角度下可显著减少方向 sweep 总数，但精度由样本数控制。\\
+RSI-tail & 不额外生成链，复用收敛后 11 个时间层 & 利用遍历性降低估计方差；与 RSI 同时计算，几乎不增加全局归约成本。\\
+\bottomrule
+\end{tabularx}
+
+\sectiontitle{2. RSI 的理论保证与代价}
+原始论文给出以下关键结论（在正权重、正核及散射收缩等条件下）：
+\begin{itemize}
+\item \textbf{无偏性：}每一迭代步，RSI 的期望等于同一离散系统 SI 的解。因此随机化改变的是估计方式，并不引入系统偏差。
+\item \textbf{方差有界：}方差随迭代步数一致有界，独立样本平均的统计误差为 $O(S^{-1/2})$；样本数增大四倍，典型随机误差约减半。
+\end{itemize}
+这里的 ``无偏'' 是相对\textbf{同一离散角度集合的 SI}，并不自动消除空间离散误差或有限样本噪声；结果比较仍须报告网格、方向数、样本数和参考解。
+
+\sectiontitle{3. 非结构网格上的并行方式}
+非结构四面体网格不能按规则坐标直接扫描。对每个方向，先按上风依赖构建 \textit{sweep plan}：\texttt{orders} 给出单元访问顺序，\texttt{levelOffsets} 给出无环依赖层边界，\texttt{hasCycle} 标记是否有环。同一层的单元无未满足上风依赖，可并行；不同层必须顺序推进。
+
+\begin{tabularx}{\linewidth}{@{}p{0.16\linewidth}Y Y@{}}
+\toprule
+层次 & SI & RSI / RSI-tail\\
+\midrule
+外层并行 & 给定 $\phi^{(k-1)}$ 后，各方向独立。方向按默认 128 个方向的 chunk 流式处理。 & 独立样本链并行。默认单 batch 最多 128 样本，230k 当前配置受主机内存限制为 64。\\
+网格并行 & 常规波前中一个线程处理一个 cell；非融合时一个 block 对应一个方向的一个依赖层，256 线程分担该层单元。宽层超过 256 单元时，增加 cell-tile 维度。 & 常规波前中一个线程处理一个样本的一个 cell；非融合时一个 block 对应一个样本当前方向的一个依赖层。批内样本共享方向 plan，但各自持有 \texttt{previousPsi/currentPsi}；宽层分块仅在 batch $\ge64$ 时启用。\\
+依赖回退 & 有环方向使用投影排序加最多 20 次局部 Gauss--Seidel pass。 & 仅当该步含有环方向时，才回退至 \texttt{sweepSamplesKernel}；此时一个 warp 分为 8 个四线程小组，每组协作处理\textbf{一个 cell}的面并归约入/出流。该四线程映射不是常规无环路径。\\
+归约 & 每个方向 chunk 以 \texttt{accumulateDirectionBatchKernel} 累加 $w_m\psi_m$；相对 $L_2$ 范数在 GPU 计算。 & 第 $N$ 步写入全局 RSI 和；$N$ 至 $N+10$ 先在样本局部累加，再对 batch 做一次全局 reduce。\\
+\bottomrule
+\end{tabularx}
+
+大网格的 RSI 无环主路径使用 \textit{fused wavefront}：一个 kernel 内按 level 顺序循环并以 \texttt{\_\_syncthreads()} 保证层间依赖，避免每一层由 CPU 发射一次 kernel。在每个 level 内仍是一线程/cell；融合只改变调度，不改变随机链、离散方程或 sweep plan。
+
+\sectiontitle{4. 显存、流式 plan 与缓存}
+230k 网格和 $S_{128}$ 的全量 order 数组约为
+\[
+ 16640\times230111\times4\ \mathrm{bytes}\approx14.7\ \mathrm{GB},
+\]
+尚未包含 $\texttt{levelOffsets}$、环标记、几何、角通量和 RSI 双层样本场，故不能安全常驻 16 GB 级 GPU。程序先按 $M\times C\times\texttt{sizeof(int)}$ 估算 order 的容量；超过默认 8 GiB 阈值（\texttt{RSI\_CUDA\_STREAMING\_PLAN\allowbreak\_THRESHOLD\_MB}）时，自动选择 streaming-plan。阈值设为 0 可强制该路径，便于复现实验；阈值以下才允许完整 plan 常驻。
+
+\textbf{Plan 的内容和不变量。} 对每个方向，plan 包含上风拓扑排序 \texttt{orders}、依赖层边界、层数以及 \texttt{hasCycle} 标记。这些数据只由网格和方向决定，不依赖 SI/RSI 当前迭代的标量通量；因此可跨迭代、跨样本 batch 复用。静态的 mesh、方向余弦和权重仅上传一次。每个动态 plan chunk 上传后，才分配/复用该 chunk 所需的角通量工作区；chunk 用完立即释放或交还给缓存，不保留 $M\times C$ 的完整角通量阵列。
+
+\textbf{SI 的流式顺序。} SI 的方向集合固定，因而按方向编号顺序处理，默认每 128 个方向为一个 chunk。一次 SI 外迭代中，对每个 chunk 的处理顺序为：
+
+\begin{center}
+\setlength{\fboxsep}{5pt}
+\renewcommand{\arraystretch}{1.05}
+\begin{tabular}{c@{\hspace{3mm}$\longrightarrow$\hspace{3mm}}c@{\hspace{3mm}$\longrightarrow$\hspace{3mm}}c@{\hspace{3mm}$\longrightarrow$\hspace{3mm}}c}
+\fcolorbox{blue}{lightblue}{\parbox[c][18mm][c]{0.16\linewidth}{\centering\footnotesize 磁盘 plan cache\\二进制方向 plan}} &
+\fcolorbox{blue}{lightgray}{\parbox[c][18mm][c]{0.16\linewidth}{\centering\footnotesize RAM host LRU\\未拼接的 \texttt{SweepPlan}}} &
+\fcolorbox{blue}{lightgray}{\parbox[c][18mm][c]{0.17\linewidth}{\centering\footnotesize RAM packed-host cache\\连续 \texttt{HostPlanChunk}}} &
+\fcolorbox{blue}{lightblue}{\parbox[c][18mm][c]{0.16\linewidth}{\centering\footnotesize GPU device cache\\\texttt{DevicePlanChunk}}}
+\end{tabular}\\[-1mm]
+\footnotesize 磁盘读取 \hspace{31mm} pack/拼接 \hspace{31mm} H2D 上传
+\end{center}
+\smallskip
+\textit{图中箭头表示冷 miss 时 plan 的生成方向；实际查询顺序相反：先查 device，再查 packed-host、host LRU 和磁盘。磁盘未命中才按网格构建 plan 并写回磁盘。}
+
+\begin{enumerate}
+\item 查询 GPU device cache；未命中时查询 SI packed-host cache；仍未命中才从磁盘 plan cache 读取，或按网格重新构建并写回磁盘。
+\item 将该 chunk 的紧凑 plan 上传到 GPU，扫掠其中所有方向，并立刻以权重归约到 \texttt{currentPhi}；不保存全部方向的 $\psi_m$。
+\item 将代价较高、后续迭代还会访问的 chunk 留在 device cache；其余 chunk 的已打包 host 表示可留在 host cache，设备工作区则复用为 temporary buffer。
+\end{enumerate}
+这使显存随 chunk 大小而非总方向数增长。SI device cache 默认预算为 10,000 MiB，packed-host cache 默认为 4,096 MiB；前者优先节省 H2D 上传，后者节省重复读取、反序列化和打包。device cache 的 ``代价'' 是首轮实测的准备时间，而非单元数：候选 chunk 的初筛分数为 cache 读取 + CPU 构建 + pack 时间；完成上传后，缓存分数再加 H2D upload 与同步时间。仅在第一轮、显存预算不足时，候选 chunk 的初筛分数高于某已缓存 chunk 的完整分数，才会驱逐该最低分 chunk 并换入候选项；分数不按 MiB 归一化。预算不是越大越好：过多常驻 plan 会压缩角通量工作区并降低 sweep 吞吐，故应以完整运行的 \texttt{si\_plan} 和 \texttt{si\_sweep} 联合选择。
+
+\textbf{RSI 的流式顺序。} RSI 每个 batch 的随机方向集合不同，直接缓存一个大 unique-direction plan 的复用率很低。实现先由样本链 schedule 收集该 batch 实际出现的 unique directions，将其映射到局部编号，然后只拼装这些方向的 compact plan 并上传；样本选择表随 batch 一并上传。为避免每个随机 batch 重新构建 plan，RSI 默认把方向拆为一个方向一个固定 cache chunk（\texttt{RSI\_CUDA\_FIXED\_PLAN\_CHUNK=1}），按需并行加载，并在运行开始前预热本次 schedule 会使用的缺失方向。这样牺牲少量元数据和文件数，换取对随机集合的细粒度复用；不会因为本 batch 只用到少数方向而搬运完整的 128-direction chunk。
+
+\begin{center}
+{\setlength{\fboxsep}{4pt}
+\renewcommand{\arraystretch}{1.05}
+\begin{tabular}{c@{\hspace{5mm}$\longrightarrow$\hspace{5mm}}c@{\hspace{5mm}$\longrightarrow$\hspace{5mm}}c}
+\fcolorbox{blue}{lightblue}{\parbox[c][15mm][c]{0.20\linewidth}{\centering\footnotesize 一个 sample batch\\$B$ 条样本链}} &
+\fcolorbox{blue}{lightgray}{\parbox[c][15mm][c]{0.20\linewidth}{\centering\footnotesize 随机 schedule\\$B\times I$ 个方向请求}} &
+\fcolorbox{blue}{lightgray}{\parbox[c][15mm][c]{0.20\linewidth}{\centering\footnotesize 去重\\$K$ 个实际方向}}
+\end{tabular}\\[1mm]
+\footnotesize $\downarrow$\quad 对这 $K$ 个方向查询/预热固定 plan\quad $\downarrow$\\[1mm]
+\begin{tabular}{c@{\hspace{5mm}$\longrightarrow$\hspace{5mm}}c@{\hspace{5mm}$\longrightarrow$\hspace{5mm}}c}
+\fcolorbox{blue}{lightgray}{\parbox[c][15mm][c]{0.20\linewidth}{\centering\footnotesize 磁盘/host LRU\\固定方向 plan}} &
+\fcolorbox{blue}{lightgray}{\parbox[c][15mm][c]{0.20\linewidth}{\centering\footnotesize RAM compact\\\texttt{HostPlanChunk}}} &
+\fcolorbox{blue}{lightblue}{\parbox[c][15mm][c]{0.20\linewidth}{\centering\footnotesize H2D 上传\\GPU \texttt{DevicePlanChunk}}}
+\end{tabular}}
+\end{center}
+\smallskip
+\textit{其中 $I=N+\texttt{tailExtra}$。上传的是本 batch 的一个 compact plan chunk，而非每个样本各上传一个 chunk；\texttt{selectedDirections}[step][sample] 保存 $B\times I$ 个请求到这 $K$ 个局部方向编号的映射，随后逐 step 扫掠。}
+
+\textbf{缓存层次与命中路径。} 从快到慢的优先级为 GPU device plan、进程内 packed-host plan/主机 LRU、磁盘二进制 plan cache、CPU 重新构建。磁盘 key 包含网格、方向集合和格式版本，key 不匹配时自动失效并重建，不会复用错误拓扑。SI 的方向访问规律固定，适合 chunk 常驻；RSI 的方向访问随机，适合固定方向 chunk、预热和 miss 去重。异步/pinned H2D 上传和 host 预取保留为可选实验：在 CPU/内存带宽充足时可隐藏部分上传等待，但曾出现与 sweep 争用而回退，故不作为默认假设。
+
+\begin{tabularx}{\linewidth}{@{}p{0.25\linewidth}Y Y@{}}
+\toprule
+层次/默认参数 & 保存什么、解决什么 & 使用策略\\
+\midrule
+磁盘 plan cache & 原始方向 plan；避免再次遍历 mesh 构建 order、level 与环标记。 & key 失配自动重建；是跨进程复用的底层缓存。\\
+通用主机 LRU（1 GiB）与 SI packed-host cache（4 GiB） & 已读入/已打包的 host plan；避免磁盘读取、反序列化和重复 pack。 & LRU 服务通用 direction plan；SI packed cache 服务未驻留 GPU 的重复 chunk。\\
+SI device plan cache（10,000 MiB） & 已上传 GPU 的 chunk plan；避免重复 H2D 和设备端重新分配。 & 固定方向顺序反复访问，按准备代价选择常驻；预算需给动态场和 sweep 留余量。\\
+RSI fixed-direction cache（chunk=1）+ prewarm & 可按单方向拼装的 plan；避免随机 batch 构建大而一次性的 unique plan。 & 并行加载、预热、miss 去重；只组装本 batch 实际使用方向。\\
+\bottomrule
+\end{tabularx}
+
+对使用者而言，先看日志中的 \texttt{si/rsi\_plan}、cache hit/miss、H2D bytes 与 \texttt{si/rsi\_sweep}：若 plan 占主导，优先检查磁盘 cache、host/device 预算和 RSI 固定方向复用；若 sweep 占主导，增大 cache 未必有效，应转而分析 fused wavefront、level 宽度与访存。流式 plan 的目标是把高方向问题从 ``显存无法容纳'' 转为 ``可用可控的准备成本''，而不是声称 plan 准备完全免费。
+
+\sectiontitle{5. 当前 30k / 230k 数值结果}
+\begin{tabularx}{\linewidth}{@{}lrrY@{}}
+\toprule
+网格 & 单元数 & 平均单元体积 & 标量通量图计算配置\\
+\midrule
+30k & 36,470 & $2.74198\times10^{-5}$ & coarse SI：$S_4$ / 24 方向；fine SI、RSI、RSI-tail：$S_{128}$ / 16,640 方向；RSI 8,192 样本。\\
+230k & 230,111 & $4.34573\times10^{-6}$ & 同上；展示标量通量的三维等值面、$y=0$ 原始截面与 $y=0.5$（截去 $<0.015$）截面。\\
+\bottomrule
+\end{tabularx}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/30k_mesh.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/230k_mesh.png}\\[-2mm]
+\small (a) 30k：36,470 个四面体单元 \hfill (b) 230k：230,111 个四面体单元
+\caption{标量通量计算使用的三维非结构网格。30k 与 230k 是近似标记；后者以更小的平均单元体积解析几何与通量的空间变化。}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{results/Figures/actual_inflow_mesh_30k.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/actual_inflow_mesh_230k.png}\\[-2mm]
+\small (a) 30k：36,470 个单元 \hfill (b) 230k：230,111 个单元
+\caption{30k 与 230k 网格底面 $y=0$ 的实际入射区域示意。图中细线为网格三角面，颜色表示三角面落入入射窗口的面积比例；蓝色虚线表示面积为 $0.04$ 的理想圆形区域。}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/si_coarse_y=0.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/si_fine_y=0.png}\\[-2mm]
+\small (a) SI coarse，$S_4$ \hfill (b) SI fine，$S_{128}$\\[3mm]
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/rsi_y=0.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/rsi_tail_y=0.png}\\[-2mm]
+\small (c) RSI，$S_{128}$，8,192 样本 \hfill (d) RSI-tail，同一批样本链
+\caption{30k 网格底面 $y=0$ 的标量通量 $\phi$ 计算结果，比较四种角度处理方法。图用于比较空间形态；其本身不构成相对误差量化。}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/si_coarse_y=0.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/si_fine_y=0.png}\\[-2mm]
+\small (a) SI coarse，$S_4$ \hfill (b) SI fine，$S_{128}$\\[3mm]
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/rsi_y=0.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/rsi_tail_y=0.png}\\[-2mm]
+\small (c) RSI，$S_{128}$，8,192 样本 \hfill (d) RSI-tail，同一批样本链
+\caption{230k 网格底面 $y=0$ 的标量通量 $\phi$ 计算结果，比较四种角度处理方法。图用于比较空间形态；其本身不构成相对误差量化。}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/si_coarse_y=0.5_cutoff_0.015.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/si_fine_y=0.5_cutoff_0.015.png}\\[-2mm]
+\small (a) SI coarse，$S_4$ \hfill (b) SI fine，$S_{128}$\\[3mm]
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/rsi_y=0.5_cutoff_0.015.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/rsi_tail_y=0.5_cutoff_0.015.png}\\[-2mm]
+\small (c) RSI，$S_{128}$，8,192 样本 \hfill (d) RSI-tail，同一批样本链
+\caption{30k 网格中部 $y=0.5$ 的标量通量 $\phi$ 计算结果。为便于观察低值传播区域，图中不显示小于 $0.015$ 的通量值；四幅图采用相同筛选规则。}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/si_coarse_y=0.5_cutoff_below_0.015.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/si_fine_y=0.5_cutoff_below_0.015.png}\\[-2mm]
+\small (a) SI coarse，$S_4$ \hfill (b) SI fine，$S_{128}$\\[3mm]
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/rsi_y=0.5_cutoff_below_0.015.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/rsi_tail_y=0.5_cutoff_below_0.015.png}\\[-2mm]
+\small (c) RSI，$S_{128}$，8,192 样本 \hfill (d) RSI-tail，同一批样本链
+\caption{230k 网格中部 $y=0.5$ 的标量通量 $\phi$ 计算结果。为便于观察低值传播区域，图中不显示小于 $0.015$ 的通量值；四幅图采用相同筛选规则。}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/si_coarse_iso_0.05_0.5_1.0.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/si_fine_iso_0.05_0.5_1.0.png}\\[-2mm]
+\small (a) SI coarse，$S_4$ \hfill (b) SI fine，$S_{128}$\\[3mm]
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/rsi_iso_0.05_0.5_1.0.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/30k/rsi_tail_iso_0.05_0.5_1.0.png}\\[-2mm]
+\small (c) RSI，$S_{128}$，8,192 样本 \hfill (d) RSI-tail，同一批样本链
+\caption{30k 网格的三维标量通量 $\phi$ 等值面计算结果。三个等值面分别为 $\phi=1$、$0.5$ 和 $0.05$；用于观察通量在体内的整体传播形态。}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/si_coarse_iso_0.05_0.5_1.0.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/si_fine_iso_0.05_0.5_1.0.png}\\[-2mm]
+\small (a) SI coarse，$S_4$ \hfill (b) SI fine，$S_{128}$\\[3mm]
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/rsi_iso_0.05_0.5_1.0.png}\hfill
+\includegraphics[width=.47\linewidth]{results/Figures/FIG5/230k/rsi_tail_iso_0.05_0.5_1.0.png}\\[-2mm]
+\small (c) RSI，$S_{128}$，8,192 样本 \hfill (d) RSI-tail，同一批样本链
+\caption{230k 网格的三维标量通量 $\phi$ 等值面计算结果。三个等值面分别为 $\phi=1$、$0.5$ 和 $0.05$；用于观察通量在体内的整体传播形态。}
+\end{figure}
+
+\FloatBarrier
+
+\textbf{中心源（mid-source）算例。} 以下结果采用文件中的中心源设置，即源项位于计算域内部中心，
+而非前述底面 $y=0$ 的边界入射源。图中仍使用相同的三个等值面（$\phi=1$、$0.5$ 和 $0.05$），
+以便观察源位置变化对空间传播形态及角度离散痕迹的影响。
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{mid-source/30k/SIcoarse.png}\hfill
+\includegraphics[width=.47\linewidth]{mid-source/30k/SIfine.png}\\[-2mm]
+\small (a) SI coarse，$S_4$ \hfill (b) SI fine，$S_{128}$\\[3mm]
+\includegraphics[width=.47\linewidth]{mid-source/30k/RSI.png}\hfill
+\includegraphics[width=.47\linewidth]{mid-source/30k/RSI-tail.png}\\[-2mm]
+\small (c) RSI，$S_{128}$，8,192 样本 \hfill (d) RSI-tail，同一批样本链
+\caption{30k 网格中心源算例的三维标量通量 $\phi$ 等值面。中心源使高通量区域从计算域内部向外传播；四幅图沿用第五节的 SI、RSI 与 RSI-tail 配置。}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=.47\linewidth]{mid-source/230k/SIcoarse.png}\hfill
+\includegraphics[width=.47\linewidth]{mid-source/230k/SI-fine.png}\\[-2mm]
+\small (a) SI coarse，$S_4$ \hfill (b) SI fine，$S_{128}$\\[3mm]
+\includegraphics[width=.47\linewidth]{mid-source/230k/rsi.png}\hfill
+\includegraphics[width=.47\linewidth]{mid-source/230k/RSI-tail.png}\\[-2mm]
+\small (c) RSI，$S_{128}$，8,192 样本 \hfill (d) RSI-tail，同一批样本链
+\caption{230k 网格中心源算例的三维标量通量 $\phi$ 等值面。更细网格保留了中心源向外传播的整体结构；图像仅用于定性比较，不替代相对误差或守恒量化。}
+\end{figure}
+
+\FloatBarrier
+
+场图的直接观察是：低角度 $S_4$ SI 的角度离散痕迹最明显；提高到 $S_{128}$ 后，确定性 SI 的解明显平滑。RSI 与 RSI-tail 在同样的高角度方向库中以随机链采样，tail 利用额外稳定步平均，视觉上提供了更平滑的随机估计。30k 与 230k 的二维截面和三维等值面均应以此作\textbf{定性}比较；$y=0.5$ 的阈值仅改变显示范围，不是额外数值处理。这批场图未给出其相对参考解的数值误差，不能由图片单独声称精度排序。
+
+\sectiontitle{6. 性能与并行度实验}
+\textbf{本节标量通量算例的时间口径。} 下表是对应算例日志中的总时间 / GPU sweep 时间，单位为秒。SI plan 和 RSI plan 分别包含各自阶段的 plan 读取、组装、打包与上传，不能简单归为 kernel 性能。
+
+\begin{tabularx}{\linewidth}{@{}lrrrrrr@{}}
+\toprule
+运行路径 & SI plan & SI total & SI sweep & RSI plan & RSI total & RSI sweep\\
+\midrule
+30k，$S_4$ & 0.160 & 0.219 & 0.049 & -- & -- & --\\
+30k，$S_{128}$ non-streaming & 1.738$^*$ & 60.139 & 58.034 & -- & 88.500 & 84.712\\
+30k，$S_{128}$ streaming & 6.356 & 60.965 & 52.591 & 12.943 & 102.494 & 84.747\\
+230k，$S_4$ streaming & 0.305 & 0.565 & 0.228 & -- & -- & --\\
+230k，$S_{64}$ streaming（1,024 样本） & 6.170 & 14.558 & 8.424 & 16.497 & 21.535 & 4.196\\
+230k，$S_{128}$ streaming（8,192 样本） & 45.700 & 782.566 & 715.562 & 80.279 & 658.057 & 550.557\\
+\bottomrule
+\end{tabularx}
+
+\footnotesize $^*$ non-streaming 路径仅在 SI 前一次性上传全量 plan，随后由 RSI 复用；该 1.738 s 是共享 setup，不能归为 RSI 的独立 plan 时间。\normalsize
+
+这说明：230k/$S_{64}$/1,024 中 RSI sweep 已低于 SI sweep（4.196 s vs 8.424 s），但 plan 使其总时间仍较高；到 230k/$S_{128}$/8,192，RSI 的 sweep 和总时间均低于 SI（550.557 s vs 715.562 s；658.057 s vs 782.566 s）。30k 上 RSI 的额外样本、plan 和调度成本尚未摊销。两类优化要分别看待：流式 plan 解决\textit{能否运行}，缓存与 fused wavefront 降低\textit{准备和发射开销}，并不改变 RSI 的统计收敛规律。
+
+\textbf{完整因子矩阵。} 已完成 269/270 组测试：3 种网格（9,187 / 36,470 / 94,378 单元）、6 档方向（120--50,624）、5 档样本（8--4,096）和 batch 64/128/256；缺少 100k、$S_{224}$、4,096 样本、请求 batch 256 一组。30k 行的误差为 RSI-tail 相对同网格 $S_{316}$（100,488 方向）SI 场的相对 $L_2$；为补充大网格行为，表末另列两组 230k 实测，其误差相对同一 $S_N$ 的 SI-fine 场。
+
+\begin{tabularx}{\linewidth}{@{}lrrrrY@{}}
+\toprule
+代表组合 & 方向数 & 样本数 & batch & 端到端 RSI/SI & RSI-tail 误差\\
+\midrule
+30k / $S_{70}$ & 5,040 & 4,096 & 128 & 0.345$\times$ & 1.945\%\\
+30k / $S_{100}$ & 10,200 & 4,096 & 128 & 0.723$\times$ & 1.602\%\\
+30k / $S_{224}$ & 50,624 & 4,096 & 64 / 128 / 256 & 3.179 / \textbf{3.740} / 3.111$\times$ & \textbf{1.054\%}\\
+30k / $S_{224}$ & 50,624 & 512 & 128 & 15.456$\times$ & 4.767\%\\
+30k / $S_{224}$ & 50,624 & 8 & 128 & 759.439$\times$ & 35.121\%\\
+230k / $S_{64}^\dagger$ & 4,224 & 1,024 & 64 & 1.479$\times$ & 1.716\%\\
+230k / $S_{128}^\dagger$ & 16,640 & 8,192 & 128 & \textbf{0.840}$\times$ & \textbf{0.689\%}\\
+\bottomrule
+\end{tabularx}
+
+\footnotesize $^\dagger$ 230k 行来自独立的 streaming 实测；误差相对同一方向集合的 SI-fine，而非 30k 行使用的 $S_{316}$ 参考场。\normalsize
+
+实验揭示的规律如下。
+\begin{itemize}
+\item \textbf{方向数是端到端加速的首要条件。} 低角度（120 方向）中 RSI 的调度与 plan 开销不能摊销，三种网格均慢于 SI；高角度才出现实际总时间优势。
+\item \textbf{样本数决定精度--时间折中。} 30k/$S_{224}$/batch 128 下，8、64、512、1,024、4,096 样本的误差依次为 35.121\%、19.619\%、4.767\%、2.395\%、1.054\%；加速比相应从 759.439$\times$ 降至 48.210、15.456、10.040、3.740$\times$。
+\item \textbf{batch 128 是当前机器的平衡点。} 在上述低误差组合中，它优于 64 和 256；过小 batch 使 kernel 并行度不足，过大 batch 不保证继续提升。
+\item \textbf{端到端加速不等于单 sweep 更快。} 30k/$S_{224}$/4,096/batch 128 的 SI/RSI 单位 sweep 吞吐分别为 170.96/102.88 Mcell-sweeps/s，RSI 仅为 SI 的 0.602 倍；但 SI 需 $50,624\times14=708,736$ 次 directional sweep，而 RSI-tail 仅需 $4,096\times24=98,304$ 次 sample sweep，工作量减少 7.21 倍，最终端到端加速为 3.740 倍。
+\end{itemize}
+
+\sectiontitle{7. 瓶颈、结论与建议}
+对 30k/$S_{224}$/4,096/batch 128 的 Nsight 采样中，\texttt{sweepSamplesKernel} 占 GPU kernel 时间 62.9\%，fused wavefront kernel 占 36.5\%。前者采样 grid 只有 1 block、实际/理论占用率为 2.08\% / 83.33\%，对应有环回退路径的低并行度；后者 grid 为 128 blocks、仅 0.37 waves/SM，且 L1 命中 9.48\%、L2 命中 97.14\%。两者全局内存 sector 的 excessive/uncoalesced 比例约为 39\% 和 75\%。
+
+因此当前最有价值的后续工作顺序是：
+\begin{enumerate}
+\item 合并或重构有环 \texttt{sweepSamplesKernel} 的样本工作，优先消除单 block 低占用；
+\item 改善 fused wavefront 的全局访存合并度与 level 内负载均衡；
+\item 按目标误差选择样本数，默认优先 batch 128；低角度问题仍选 SI，高角度且允许统计误差时选 RSI-tail；
+\item 后续结果同时报告参考解、相对 $L_2$ 误差、总时间、sweep 时间和 plan 时间，避免把吞吐、预处理和端到端加速混为一谈。
+\end{enumerate}
+
+\sectiontitle{8. 公平样本实验}
+\textbf{30k/$S_{224}$ 公平样本实验。} 本节采用 36,470 单元、$S_{224}$（50,624 个方向）、batch 128、\texttt{tailExtra=0} 的新运行；SI-fine 是同一方向集合的确定性参考，RSI 也只执行与 SI 相同的 14 个迭代步。误差为 RSI 相对 SI-fine 的 $L_2$ 误差，阈值为 1\%。表中 ``重复 1/2'' 是同一配置的顺序执行：重复 2 复用了重复 1 已写入的磁盘 plan cache，因而是 warm-cache 时间，\textbf{不是}独立 cold-cache 随机重复。两次使用相同随机链，故同一样本数的场误差相同。
+
+\begin{tabularx}{\linewidth}{@{}rrrrrrr@{}}
+\toprule
+重复 & 样本数 & RSI 相对 $L_2$ & SI sweep (s) & RSI sweep (s) & SI total (s) & RSI total (s)\\
+\midrule
+1 & 1,000  & 5.472\% & 146.357 & 5.958   & 176.487 & 9.367\\
+1 & 5,000  & 3.384\% & 138.912 & 28.015  & 189.771 & 53.151\\
+1 & 10,000 & 2.275\% & 131.668 & 48.255  & 149.458 & 71.227\\
+1 & 20,000 & 1.331\% & 136.183 & 104.432 & 162.429 & 139.970\\
+1 & 40,000 & \textbf{0.983\%} & 143.506 & 217.527 & 169.442 & 287.268\\
+\addlinespace
+2 & 1,000  & 5.472\% & 146.701 & 5.642   & 170.212 & 7.996\\
+2 & 5,000  & 3.384\% & 144.598 & 28.668  & 170.719 & 38.060\\
+2 & 10,000 & 2.275\% & 130.837 & 47.890  & 152.356 & 66.204\\
+2 & 20,000 & 1.331\% & 130.742 & 112.984 & 152.998 & 149.425\\
+2 & 40,000 & \textbf{0.983\%} & 148.507 & 222.106 & 172.666 & 289.909\\
+\bottomrule
+\end{tabularx}
+
+在此 SI-fine 参考与 1\% 阈值下，只有 40,000 samples 达标。因 \texttt{tailExtra=0}，这里没有第 6 节 4,096-sample 因子矩阵中的额外 10 次 tail sweep；两组实验的精度、工作量和计时不能直接并列为同一口径。1,000--20,000 samples 的 RSI 总时间低于对应 SI；40,000 samples 为达到 1\% 精度而付出的 RSI sweep 已超过 SI。重复 2 的 5,000-sample RSI total 从 53.151 s 降至 38.060 s，主要反映 plan cache 命中，而非计算 kernel 获得了同等幅度的加速。
+
+\clearpage
+\sectiontitle{单 GPU 样本并行饱和扫描}
+本实验固定 36,470 单元空间网格和 $S_{32}$（1,088 个方向），在一张 NVIDIA GeForce RTX 5070 Ti（16,303 MiB）上运行。RSI-tail 取 \texttt{tailExtra=10}，每 batch 上限固定为 1,024；各 case 独占 GPU 顺序执行。表中的 GPU-Util 是 \texttt{nvidia-smi} 以一秒间隔报告的设备忙碌比例，不是 Nsight Compute 的 achieved occupancy。
+
+\begin{tabularx}{\linewidth}{@{}rrrrr@{}}
+\toprule
+样本数 & CUDA total (s) & RSI sweep (s) & GPU-Util 平均 & 显存峰值 (MiB)\\
+\midrule
+1,000  & 98.393   & 55.020   & 99.73\% & 4,582\\
+2,000  & 265.899  & 183.246  & 99.77\% & 7,566\\
+4,000  & 471.643  & 380.564  & 99.24\% & 7,607\\
+8,000  & 610.210  & 518.168  & 99.36\% & 7,631\\
+16,000 & 1,237.560 & 1,166.410 & 99.54\% & 12,432\\
+\bottomrule
+\end{tabularx}
+
+结果表明，1,000 样本时设备级 GPU-Util 已约为 99.7\%，并非只使用了约十分之一的计算硬件。1024 是该配置的单次瞬时样本并行度；2,000 样本由一个 1,024-sample 满载 batch 和一个 976-sample batch 顺序完成，16,000 样本则由 15 个满载 batch 和一个 640-sample 尾 batch 完成。因此，样本数增加主要延长 GPU 近满载运行的时间，而不会使计算单元占用按样本数成比例上升。所有 case 的显存峰值均低于设备容量，故不应为填满显存而分配无效工作区。
+
+\textbf{该实验不符合严格的强扩展定义。} 强扩展要求固定全局问题规模（例如固定为 16,000 个样本）并增加并行资源数 $P$，测量 $T(P)$、加速比 $T(1)/T(P)$ 和效率 $T(1)/(P T(P))$。本表固定的是一张完整 GPU，而增加的是总样本数，故它是\textbf{单 GPU 样本规模、吞吐量与饱和度扫描}。它证明当前 batch 在 1,000 样本附近已使设备持续忙碌，但不能说明多 GPU 或更多 SM 资源下的强扩展效率。正式强扩展实验应将 16,000 样本按 $P=1,2,4,8,\ldots$ 张 GPU 分摊，并保持网格、方向集合、随机种子和总样本数不变；每点应在 warm-cache 后重复至少三次。精确的 kernel 核心占用还需补充 Nsight Compute 的 achieved occupancy、SM throughput 与显存带宽指标。
+
+\vfill
+{\small\color{gray} 数据来源：RSI 原理论文、并行优化说明（当前实现版）、30k/230k 结果汇总 PDF，以及新增的可复现实验结果。报告中的性能数字沿用各自材料的计时与误差定义。}
+\end{document}
